@@ -27,7 +27,7 @@ npm install -g aws-cdk
 pip install boto3
 
 # Clone and install
-git clone https://github.com/shankmanok/pulse.git
+git clone https://github.com/shankmanok/aws-pulse.git
 cd aws-pulse
 npm install
 
