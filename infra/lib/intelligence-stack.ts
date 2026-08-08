@@ -42,8 +42,15 @@ export class IntelligenceStack extends cdk.Stack {
           image: lambda.Runtime.PYTHON_3_12.bundlingImage,
           command: [
             'bash', '-c',
-            'mkdir -p /asset-output/python/shared && cp -r . /asset-output/python/shared/ && pip install pydantic ulid-py structlog boto3 -t /asset-output/python --quiet',
+            'mkdir -p /asset-output/python/shared && cp -r . /asset-output/python/shared/ && pip3 install pydantic ulid-py structlog boto3 -t /asset-output/python --quiet',
           ],
+          local: {
+            tryBundle(outputDir: string) {
+              const { execSync } = require('child_process');
+              execSync(`mkdir -p ${outputDir}/python/shared && cp -r ../src/shared/* ${outputDir}/python/shared/ && pip3 install pydantic ulid-py structlog boto3 -t ${outputDir}/python --quiet`);
+              return true;
+            },
+          },
         },
       }),
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
