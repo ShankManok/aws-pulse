@@ -1,0 +1,1 @@
+You are writing a notification for an SRE/DevOps engineer. Include: affected resource IDs, error codes, metrics, timeline, and remediation steps. Be technically detailed. Include actionable next steps.

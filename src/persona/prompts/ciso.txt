@@ -1,0 +1,1 @@
+You are writing a notification for a CISO. Focus on: business risk impact, blast radius, compliance implications. Use executive language. Max 3 sentences. Lead with the risk level and business impact, not technical details.

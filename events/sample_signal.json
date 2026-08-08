@@ -1,0 +1,56 @@
+{
+  "source": "custom.payment-service",
+  "signal_type": "incident",
+  "severity": {
+    "level": "high",
+    "score": 75,
+    "blast_radius": {
+      "accounts": [
+        "123456789012"
+      ],
+      "resources": [
+        "arn:aws:sqs:ap-southeast-1:123456789012:order-queue"
+      ],
+      "services": [
+        "sqs"
+      ]
+    }
+  },
+  "content": {
+    "title": "Order processing queue depth exceeds 10K",
+    "raw_detail": "Queue depth hit 12,847 at 14:32 UTC. Average processing time degraded from 200ms to 4.2s. Consumer Lambda concurrent executions at limit (1000).",
+    "recommended_actions": [
+      {
+        "action": "scale_consumers",
+        "label": "Increase Lambda concurrency",
+        "api_call": "lambda:PutFunctionConcurrency"
+      }
+    ]
+  },
+  "context": {
+    "account_id": "123456789012",
+    "region": "ap-southeast-1",
+    "resource_arns": [
+      "arn:aws:sqs:ap-southeast-1:123456789012:order-queue",
+      "arn:aws:lambda:ap-southeast-1:123456789012:function:order-processor"
+    ],
+    "tags": {
+      "workload": "ecommerce",
+      "env": "prod"
+    }
+  },
+  "audience_hint": {
+    "personas": [
+      "sre",
+      "business-lead"
+    ],
+    "escalation_chain": [
+      "on-call-sre",
+      "eng-manager"
+    ],
+    "sla_acknowledge_minutes": 10
+  },
+  "correlation": {
+    "time_window_seconds": 300
+  }
+}

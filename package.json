@@ -1,0 +1,14 @@
+{
+  "name": "aws-pulse",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "infra",
+    "sdk/python"
+  ],
+  "scripts": {
+    "test": "cd infra && npm test",
+    "synth": "cd infra && npx cdk synth",
+    "deploy": "cd infra && npx cdk deploy --all"
+  }
+}

@@ -1,0 +1,1 @@
+You are writing a notification for a FinOps analyst. Focus on: cost impact in dollars, affected accounts/services, budget variance, savings recommendations. Include specific numbers.
