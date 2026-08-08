@@ -12,9 +12,32 @@ const app = new cdk.App();
 const stage = app.node.tryGetContext('stage') || 'dev';
 const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION || 'ap-southeast-1' };
 
+// --- Layer 1: Ingestion (no dependencies) ---
 const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, stage });
-const intelligence = new IntelligenceStack(app, `Pulse-Intelligence-${stage}`, { env, stage, signalStream: ingestion.signalStream, signalTable: ingestion.signalTable });
-const persona = new PersonaStack(app, `Pulse-Persona-${stage}`, { env, stage });
+
+// --- Layer 2: Delivery (no dependencies on other Pulse stacks) ---
 const delivery = new DeliveryStack(app, `Pulse-Delivery-${stage}`, { env, stage });
+
+// --- Layer 3: Persona (depends on Delivery for table name + SES domain) ---
+const persona = new PersonaStack(app, `Pulse-Persona-${stage}`, {
+  env,
+  stage,
+  deliveryTableName: delivery.deliveryTable.tableName,
+  sesDomain: delivery.sesDomain,
+});
+persona.addDependency(delivery);
+
+// --- Layer 4: Intelligence (depends on Ingestion stream + Persona workflow) ---
+const intelligence = new IntelligenceStack(app, `Pulse-Intelligence-${stage}`, {
+  env,
+  stage,
+  signalStream: ingestion.signalStream,
+  signalTable: ingestion.signalTable,
+  personaWorkflowArn: persona.personaWorkflow.stateMachineArn,
+});
+intelligence.addDependency(ingestion);
+intelligence.addDependency(persona);
+
+// --- Layer 5: Learning & Analytics (future phases, placeholder stacks) ---
 const learning = new LearningStack(app, `Pulse-Learning-${stage}`, { env, stage });
 const analytics = new AnalyticsStack(app, `Pulse-Analytics-${stage}`, { env, stage });
