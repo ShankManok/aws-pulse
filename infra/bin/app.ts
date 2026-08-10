@@ -7,6 +7,7 @@ import { PersonaStack } from '../lib/persona-stack';
 import { DeliveryStack } from '../lib/delivery-stack';
 import { LearningStack } from '../lib/learning-stack';
 import { AnalyticsStack } from '../lib/analytics-stack';
+import { OrgSetupStack } from '../lib/org-setup-stack';
 
 const app = new cdk.App();
 const stage = app.node.tryGetContext('stage') || 'dev';
@@ -62,3 +63,15 @@ learning.addDependency(delivery);
 learning.addDependency(persona);
 learning.addDependency(ingestion);
 learning.addDependency(analytics);
+
+// --- Optional: OrgSetupStack (only when pulseAccountId context is provided) ---
+// Deploy with: cdk deploy Pulse-OrgSetup-dev --context stage=dev --context pulseAccountId=123456789012
+const pulseAccountId = app.node.tryGetContext('pulseAccountId');
+if (pulseAccountId) {
+  new OrgSetupStack(app, `Pulse-OrgSetup-${stage}`, {
+    env,
+    stage,
+    pulseAccountId,
+    organizationId: app.node.tryGetContext('organizationId'),
+  });
+}

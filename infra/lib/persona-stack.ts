@@ -5,6 +5,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
@@ -405,11 +406,47 @@ export class PersonaStack extends cdk.Stack {
 
     seedPersonas.node.addDependency(this.personaTable);
 
+    // ===== Subscription Agent (NL subscription API) =====
+
+    const subscriptionAgent = new lambda.Function(this, 'SubscriptionAgent', {
+      functionName: `pulse-subscription-agent-${props.stage}`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'subscription_agent.handler',
+      code: lambda.Code.fromAsset('../src/persona'),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        PERSONA_TABLE_NAME: this.personaTable.tableName,
+        STAGE: props.stage,
+      },
+    });
+
+    this.personaTable.grantReadWriteData(subscriptionAgent);
+
+    subscriptionAgent.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['bedrock:InvokeModel'],
+      resources: ['*'],
+    }));
+
+    // API Gateway for subscription endpoint
+    const personaApi = new apigateway.RestApi(this, 'PersonaApi', {
+      restApiName: `pulse-persona-api-${props.stage}`,
+      description: 'AWS Pulse Persona Management API',
+      deployOptions: { stageName: props.stage },
+    });
+
+    const personasResource = personaApi.root.addResource('v1').addResource('personas');
+    const personaIdResource = personasResource.addResource('{personaId}');
+    const subscribeResource = personaIdResource.addResource('subscribe');
+    subscribeResource.addMethod('POST', new apigateway.LambdaIntegration(subscriptionAgent));
+
     // --- Outputs ---
     new cdk.CfnOutput(this, 'PersonaTableName', { value: this.personaTable.tableName });
     new cdk.CfnOutput(this, 'WorkflowArn', { value: this.personaWorkflow.stateMachineArn });
     new cdk.CfnOutput(this, 'ChatbotSnsTopicArn', { value: this.chatbotSnsTopic.topicArn });
     new cdk.CfnOutput(this, 'EscalationHandlerArn', { value: escalationHandler.functionArn });
     new cdk.CfnOutput(this, 'ScheduleEscalationArn', { value: scheduleEscalation.functionArn });
+    new cdk.CfnOutput(this, 'PersonaApiUrl', { value: personaApi.url });
   }
 }

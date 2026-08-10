@@ -23,3 +23,5 @@ class Config:
     AUDIT_BUCKET_NAME = os.environ.get("AUDIT_BUCKET_NAME", "")
     NOISE_THRESHOLD = int(os.environ.get("NOISE_THRESHOLD", "3"))
     WINDOW_DAYS = int(os.environ.get("WINDOW_DAYS", "30"))
+    # Phase 4
+    PREDICTORS_TABLE_NAME = os.environ.get("PREDICTORS_TABLE_NAME", "")
