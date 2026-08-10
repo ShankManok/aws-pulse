@@ -67,13 +67,35 @@ export class PersonaStack extends cdk.Stack {
       description: 'Shared utilities layer (models, config, bedrock_client)',
     });
 
+    // --- Learning module layer (for suppression_model import in audience_router) ---
+    const learningLayer = new lambda.LayerVersion(this, 'LearningLayer', {
+      code: lambda.Code.fromAsset('../src/learning', {
+        bundling: {
+          image: lambda.Runtime.PYTHON_3_12.bundlingImage,
+          command: [
+            'bash', '-c',
+            'mkdir -p /asset-output/python/learning && cp -r . /asset-output/python/learning/',
+          ],
+          local: {
+            tryBundle(outputDir: string) {
+              const { execSync } = require('child_process');
+              execSync(`mkdir -p ${outputDir}/python/learning && cp -r ../src/learning/* ${outputDir}/python/learning/`);
+              return true;
+            },
+          },
+        },
+      }),
+      compatibleRuntimes: [lambda.Runtime.PYTHON_3_12],
+      description: 'Learning module layer (suppression_model)',
+    });
+
     // --- Audience Router Lambda ---
     const audienceRouter = new lambda.Function(this, 'AudienceRouter', {
       functionName: `pulse-audience-router-${props.stage}`,
       runtime: lambda.Runtime.PYTHON_3_12,
       handler: 'audience_router.handler',
       code: lambda.Code.fromAsset('../src/persona'),
-      layers: [sharedLayer],
+      layers: [sharedLayer, learningLayer],
       timeout: cdk.Duration.seconds(15),
       memorySize: 256,
       environment: {

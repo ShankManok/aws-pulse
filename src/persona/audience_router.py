@@ -5,6 +5,7 @@ from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
+from learning.suppression_model import should_suppress
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -71,9 +72,9 @@ def handler(event, context):
         # Recommendations go to CTO
         matched_personas.add("persona-cto")
 
-    # Validate personas exist in DynamoDB
+    # Validate personas exist in DynamoDB and apply suppression rules
     persona_table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
-    valid_personas = _validate_personas(persona_table, list(matched_personas))
+    valid_personas = _validate_and_filter_personas(persona_table, list(matched_personas), signal_data)
 
     logger.info(
         "audience_routed",
@@ -103,17 +104,28 @@ def _resolve_persona_hint(hint: str) -> Optional[str]:
     return mapping.get(hint_lower)
 
 
-def _validate_personas(table, persona_ids: list[str]) -> list[str]:
-    """Validate that persona IDs exist in DynamoDB. Return only valid ones."""
+def _validate_and_filter_personas(table, persona_ids: list[str], signal_data: dict) -> list[str]:
+    """Validate personas exist and filter out those with active suppression rules."""
     valid = []
     for persona_id in persona_ids:
         try:
-            response = table.get_item(
-                Key={"personaId": persona_id},
-                ProjectionExpression="personaId",
-            )
-            if response.get("Item"):
-                valid.append(persona_id)
+            response = table.get_item(Key={"personaId": persona_id})
+            persona_config = response.get("Item")
+
+            if not persona_config:
+                continue
+
+            # Check suppression rules - skip delivery if suppressed
+            if should_suppress(signal_data, persona_config):
+                logger.info(
+                    "persona_suppressed",
+                    persona_id=persona_id,
+                    signal_id=signal_data.get("signal_id", "unknown"),
+                    source=signal_data.get("source", ""),
+                )
+                continue
+
+            valid.append(persona_id)
         except Exception as e:
             logger.warning("persona_validation_failed", persona_id=persona_id, error=str(e))
     return valid

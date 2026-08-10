@@ -19,7 +19,6 @@ const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, sta
 const delivery = new DeliveryStack(app, `Pulse-Delivery-${stage}`, { env, stage });
 
 // --- Layer 3: Persona (depends on Delivery for table name + SES domain) ---
-// Escalation engine lives here too (owns the workflow it needs to re-invoke)
 const persona = new PersonaStack(app, `Pulse-Persona-${stage}`, {
   env,
   stage,
@@ -40,6 +39,26 @@ const intelligence = new IntelligenceStack(app, `Pulse-Intelligence-${stage}`, {
 intelligence.addDependency(ingestion);
 intelligence.addDependency(persona);
 
-// --- Layer 5: Learning & Analytics (future phases, placeholder stacks) ---
-const learning = new LearningStack(app, `Pulse-Learning-${stage}`, { env, stage });
-const analytics = new AnalyticsStack(app, `Pulse-Analytics-${stage}`, { env, stage });
+// --- Layer 5: Analytics (depends on Delivery for table name) ---
+const analytics = new AnalyticsStack(app, `Pulse-Analytics-${stage}`, {
+  env,
+  stage,
+  deliveryTableName: delivery.deliveryTable.tableName,
+});
+analytics.addDependency(delivery);
+
+// --- Layer 6: Learning (depends on Delivery stream, Persona table, Signal table, Analytics table) ---
+const learning = new LearningStack(app, `Pulse-Learning-${stage}`, {
+  env,
+  stage,
+  deliveryTableName: delivery.deliveryTable.tableName,
+  deliveryTableStreamArn: delivery.deliveryTable.tableStreamArn!,
+  personaTableName: persona.personaTable.tableName,
+  personaTableArn: persona.personaTable.tableArn,
+  signalTableName: ingestion.signalTable.tableName,
+  analyticsTableName: analytics.analyticsTable.tableName,
+});
+learning.addDependency(delivery);
+learning.addDependency(persona);
+learning.addDependency(ingestion);
+learning.addDependency(analytics);
