@@ -306,3 +306,30 @@ interface CorrelationGroup {
 4. **Bedrock over custom models:** No training data needed, rapid iteration on prompts, multi-model flexibility
 5. **Two-tier latency:** P1/P2 use pre-built templates (< 3s); P3+ use full Bedrock generation (< 15s)
 
+
+
+---
+
+## Phase 2 Context (for Kiro Memory)
+
+### What's Already Built (Phase 1 - COMPLETE)
+- IngestionStack: API Gateway + Kinesis + DynamoDB SignalEvents + EventBridge rules (CloudWatch, Security Hub, Health)
+- IntelligenceStack: Correlation table + Correlator Lambda (Kinesis consumer, time-window grouping, triggers SFN)
+- PersonaStack: Persona DynamoDB table (seeded CISO/SRE/CTO), Audience Router, Content Transformer (Bedrock), Email Sender, Step Functions workflow (Route → Transform → Map[Deliver])
+- DeliveryStack: DeliveryRecords table (GSIs by-signal, by-persona), Action Callback Lambda + API Gateway
+- Shared Lambda Layer: bundled with pydantic, ulid-py, structlog, boto3 (uses local pip3 bundling, not Docker)
+
+### Phase 2 Architecture Decisions
+- **Escalation uses EventBridge Scheduler** (not SFN Wait states) - durable, survives Lambda cold starts, can be cancelled when ACK received
+- **Slack via AWS Chatbot** - not direct Slack API - keeps everything AWS-native
+- **Channel branching in Step Functions** - Choice state after Transform step routes to email/slack/both based on persona preferences
+- **SDK uses botocore SigV4** - not requests library - for proper AWS auth
+
+### File Naming Conventions
+- Lambda handlers: `src/{layer}/{function_name}.py` with a `handler(event, context)` function
+- CDK stacks: `infra/lib/{stack-name}-stack.ts`
+- Tests: `tests/unit/test_{handler_name}.py`
+- All handlers import from `shared.config` and use `structlog` for logging
+
+### Environment Variables Pattern
+Each Lambda receives: `STAGE`, `{TABLE}_TABLE_NAME`, and any service-specific vars (e.g., `SES_DOMAIN`, `PERSONA_WORKFLOW_ARN`, `CALLBACK_API_URL`)
