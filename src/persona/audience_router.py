@@ -1,6 +1,7 @@
 """Audience Router - matches signals to personas based on audience hints and subscriptions."""
 import json
 import os
+from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
@@ -85,7 +86,7 @@ def handler(event, context):
     return {"signal": signal_data, "persona_ids": valid_personas}
 
 
-def _resolve_persona_hint(hint: str) -> str | None:
+def _resolve_persona_hint(hint: str) -> Optional[str]:
     """Resolve a role hint string to a persona ID."""
     hint_lower = hint.lower()
     mapping = {

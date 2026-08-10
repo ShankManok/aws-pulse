@@ -13,6 +13,9 @@ dynamodb = boto3.resource("dynamodb")
 def handler(event, context):
     """Transform signal content for each matched persona.
 
+    Emits one transformation entry per (persona × channel) combination so the
+    downstream Map state can branch delivery by channel type.
+
     Input (from Step Functions):
         {
             "signal": { ... signal data ... },
@@ -28,6 +31,22 @@ def handler(event, context):
                     "transformed_content": "...",
                     "channel": "email",
                     "recipients": ["ciso@example.com"],
+                    "escalation_after_minutes": 15,
+                    "escalation_chain": ["persona-sre", "persona-cto"]
+                },
+                {
+                    "persona_id": "persona-sre",
+                    "transformed_content": "...",
+                    "channel": "email",
+                    "recipients": ["sre@example.com"],
+                    ...
+                },
+                {
+                    "persona_id": "persona-sre",
+                    "transformed_content": "...",
+                    "channel": "slack",
+                    "recipients": ["sre-team-channel"],
+                    ...
                 }
             ]
         }
@@ -39,8 +58,15 @@ def handler(event, context):
         logger.error("missing_signal_data")
         return {"signal": signal_data, "transformations": []}
 
+    # Check if this is an escalation (don't re-escalate)
+    is_escalation = signal_data.get("_escalation", False)
+
     persona_table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
     results = []
+
+    # Get escalation chain from original signal audience_hint
+    audience_hint = signal_data.get("audience_hint", {})
+    escalation_chain = audience_hint.get("escalation_chain", [])
 
     for persona_id in persona_ids:
         try:
@@ -58,30 +84,45 @@ def handler(event, context):
                 "language_level": persona_config.get("languageLevel", "technical_summary"),
             }
 
-            # Transform content using Bedrock
+            # Transform content using Bedrock (one call per persona, reused across channels)
             transformed_text = transform_for_persona(signal_data, config_for_transform)
+
+            # Extract delivery preferences
+            delivery_prefs = persona_config.get("deliveryPreferences", {})
+            channels = delivery_prefs.get("channels", ["email"])
+            escalation_minutes = int(delivery_prefs.get("escalationAfterMinutes", 0))
 
             # Extract recipients from persona members
             members = persona_config.get("members", [])
-            recipients = [m.get("principalId") for m in members if m.get("principalId")]
+            recipients_by_channel = _group_recipients_by_channel(members, channels)
 
-            # Determine delivery channel (email-only for MVP)
-            delivery_prefs = persona_config.get("deliveryPreferences", {})
-            channels = delivery_prefs.get("channels", ["email"])
-            channel = channels[0] if channels else "email"
+            # Emit one entry per channel
+            for channel in channels:
+                channel_recipients = recipients_by_channel.get(channel, [])
+                if not channel_recipients:
+                    # Fallback: use all members for this channel
+                    channel_recipients = [m.get("principalId") for m in members if m.get("principalId")]
 
-            results.append({
-                "persona_id": persona_id,
-                "transformed_content": transformed_text,
-                "channel": channel,
-                "recipients": recipients,
-            })
+                entry = {
+                    "persona_id": persona_id,
+                    "transformed_content": transformed_text,
+                    "channel": channel,
+                    "recipients": channel_recipients,
+                }
+
+                # Add escalation metadata (only for non-escalation deliveries)
+                if not is_escalation and escalation_minutes > 0:
+                    entry["escalation_after_minutes"] = escalation_minutes
+                    entry["escalation_chain"] = escalation_chain
+
+                results.append(entry)
 
             logger.info(
                 "content_transformed",
                 persona_id=persona_id,
                 signal_id=signal_data.get("signal_id"),
-                recipients_count=len(recipients),
+                channels=channels,
+                recipients_count=sum(len(v) for v in recipients_by_channel.values()),
             )
 
         except Exception as e:
@@ -94,3 +135,24 @@ def handler(event, context):
             continue
 
     return {"signal": signal_data, "transformations": results}
+
+
+def _group_recipients_by_channel(members: list[dict], channels: list[str]) -> dict[str, list[str]]:
+    """Group member recipients by their preferred channels.
+
+    If a member has specific channel preferences, route accordingly.
+    Otherwise, default to all configured channels.
+    """
+    result: dict[str, list[str]] = {ch: [] for ch in channels}
+
+    for member in members:
+        principal_id = member.get("principalId", "")
+        if not principal_id:
+            continue
+
+        member_channels = member.get("channels", channels)
+        for ch in member_channels:
+            if ch in result:
+                result[ch].append(principal_id)
+
+    return result

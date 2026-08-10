@@ -4,6 +4,7 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as sns from 'aws-cdk-lib/aws-sns';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 
@@ -11,11 +12,17 @@ export interface PersonaStackProps extends cdk.StackProps {
   stage: string;
   deliveryTableName: string;
   sesDomain: string;
+  escalationSchedulerArn?: string;
+  schedulerRoleArn?: string;
+  schedulerGroupName?: string;
+  escalationHandlerArn?: string;
+  callbackApiUrl?: string;
 }
 
 export class PersonaStack extends cdk.Stack {
   public readonly personaTable: dynamodb.Table;
   public readonly personaWorkflow: sfn.StateMachine;
+  public readonly chatbotSnsTopic: sns.Topic;
 
   constructor(scope: Construct, id: string, props: PersonaStackProps) {
     super(scope, id, props);
@@ -32,6 +39,12 @@ export class PersonaStack extends cdk.Stack {
     this.personaTable.addGlobalSecondaryIndex({
       indexName: 'by-role-template',
       partitionKey: { name: 'roleTemplate', type: dynamodb.AttributeType.STRING },
+    });
+
+    // --- SNS Topic for Slack via AWS Chatbot ---
+    this.chatbotSnsTopic = new sns.Topic(this, 'ChatbotSnsTopic', {
+      topicName: `pulse-chatbot-${props.stage}`,
+      displayName: 'AWS Pulse Slack Notifications',
     });
 
     // --- Shared Lambda layer for src/shared ---
@@ -106,6 +119,7 @@ export class PersonaStack extends cdk.Stack {
       environment: {
         DELIVERY_TABLE_NAME: props.deliveryTableName,
         SES_DOMAIN: props.sesDomain,
+        CALLBACK_API_URL: props.callbackApiUrl || '',
         STAGE: props.stage,
       },
     });
@@ -120,7 +134,37 @@ export class PersonaStack extends cdk.Stack {
       resources: [`arn:aws:dynamodb:*:*:table/${props.deliveryTableName}`],
     }));
 
+    // --- Slack Sender Lambda ---
+    const slackSender = new lambda.Function(this, 'SlackSender', {
+      functionName: `pulse-slack-sender-${props.stage}`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'slack_sender.handler',
+      code: lambda.Code.fromAsset('../src/delivery'),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 256,
+      environment: {
+        DELIVERY_TABLE_NAME: props.deliveryTableName,
+        CHATBOT_SNS_TOPIC_ARN: this.chatbotSnsTopic.topicArn,
+        CALLBACK_API_URL: props.callbackApiUrl || '',
+        STAGE: props.stage,
+      },
+    });
+
+    this.chatbotSnsTopic.grantPublish(slackSender);
+
+    slackSender.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:PutItem'],
+      resources: [`arn:aws:dynamodb:*:*:table/${props.deliveryTableName}`],
+    }));
+
+    // --- Schedule Escalation Lambda (imported from DeliveryStack) ---
+    const scheduleEscalationFn = props.escalationSchedulerArn
+      ? lambda.Function.fromFunctionArn(this, 'ScheduleEscalationImport', props.escalationSchedulerArn)
+      : undefined;
+
     // --- Step Functions Workflow ---
+
     // Step 1: Route signal to matching personas
     const routeStep = new tasks.LambdaInvoke(this, 'RouteToPersonas', {
       lambdaFunction: audienceRouter,
@@ -133,14 +177,50 @@ export class PersonaStack extends cdk.Stack {
       outputPath: '$.Payload',
     });
 
-    // Step 3: Deliver to each recipient via email
-    const deliverStep = new tasks.LambdaInvoke(this, 'DeliverEmail', {
+    // Step 3: Deliver - Map over transformations, branch by channel
+    const deliverEmailStep = new tasks.LambdaInvoke(this, 'DeliverEmail', {
       lambdaFunction: emailSender,
-      inputPath: '$',
-      outputPath: '$.Payload',
+      resultPath: '$.deliveryResult',
     });
 
-    // Map state to iterate over transformations and deliver each
+    const deliverSlackStep = new tasks.LambdaInvoke(this, 'DeliverSlack', {
+      lambdaFunction: slackSender,
+      resultPath: '$.deliveryResult',
+    });
+
+    // Channel choice: route to email or slack based on delivery.channel
+    const channelChoice = new sfn.Choice(this, 'ChooseChannel')
+      .when(
+        sfn.Condition.stringEquals('$.delivery.channel', 'slack'),
+        deliverSlackStep,
+      )
+      .otherwise(deliverEmailStep);
+
+    // After delivery, schedule escalation if configured
+    let postDeliveryChain: sfn.IChainable;
+
+    if (scheduleEscalationFn) {
+      const scheduleEscalationStep = new tasks.LambdaInvoke(this, 'ScheduleEscalation', {
+        lambdaFunction: scheduleEscalationFn,
+        payload: sfn.TaskInput.fromObject({
+          'delivery.$': '$.delivery',
+          'signal.$': '$.signal',
+          'delivery_ids.$': '$.deliveryResult.Payload.delivery_ids',
+        }),
+        outputPath: '$.Payload',
+      });
+
+      // After email delivery → schedule escalation
+      deliverEmailStep.next(scheduleEscalationStep);
+      // After slack delivery → schedule escalation
+      deliverSlackStep.next(scheduleEscalationStep);
+
+      postDeliveryChain = channelChoice;
+    } else {
+      postDeliveryChain = channelChoice;
+    }
+
+    // Map state iterates over transformations (persona × channel)
     const deliverMap = new sfn.Map(this, 'DeliverToRecipients', {
       itemsPath: '$.transformations',
       parameters: {
@@ -149,9 +229,9 @@ export class PersonaStack extends cdk.Stack {
       },
       maxConcurrency: 5,
     });
-    deliverMap.itemProcessor(deliverStep);
+    deliverMap.itemProcessor(postDeliveryChain);
 
-    // Wire: Route → Transform → Deliver (map)
+    // Wire: Route → Transform → Deliver (map with channel branching)
     const definition = routeStep
       .next(transformStep)
       .next(deliverMap);
@@ -197,9 +277,9 @@ export class PersonaStack extends cdk.Stack {
                     name: { S: 'SRE' },
                     roleTemplate: { S: 'sre' },
                     languageLevel: { S: 'detailed_technical' },
-                    members: { L: [{ M: { principalId: { S: 'sre@example.com' }, channels: { L: [{ S: 'email' }] } } }] },
+                    members: { L: [{ M: { principalId: { S: 'sre@example.com' }, channels: { L: [{ S: 'email' }, { S: 'slack' }] } } }] },
                     deliveryPreferences: { M: {
-                      channels: { L: [{ S: 'email' }] },
+                      channels: { L: [{ S: 'email' }, { S: 'slack' }] },
                       cadence: { S: 'realtime' },
                       escalationAfterMinutes: { N: '10' },
                     }},
@@ -230,7 +310,7 @@ export class PersonaStack extends cdk.Stack {
             ],
           },
         },
-        physicalResourceId: cr.PhysicalResourceId.of('seed-personas-v1'),
+        physicalResourceId: cr.PhysicalResourceId.of('seed-personas-v2'),
       },
       policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
         resources: [this.personaTable.tableArn],
@@ -242,5 +322,6 @@ export class PersonaStack extends cdk.Stack {
     // --- Outputs ---
     new cdk.CfnOutput(this, 'PersonaTableName', { value: this.personaTable.tableName });
     new cdk.CfnOutput(this, 'WorkflowArn', { value: this.personaWorkflow.stateMachineArn });
+    new cdk.CfnOutput(this, 'ChatbotSnsTopicArn', { value: this.chatbotSnsTopic.topicArn });
   }
 }

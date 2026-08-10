@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import 'source-map-support/register';
 import * as cdk from 'aws-cdk-lib';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { IngestionStack } from '../lib/ingestion-stack';
 import { IntelligenceStack } from '../lib/intelligence-stack';
 import { PersonaStack } from '../lib/persona-stack';
@@ -15,17 +16,29 @@ const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_
 // --- Layer 1: Ingestion (no dependencies) ---
 const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, stage });
 
-// --- Layer 2: Delivery (no dependencies on other Pulse stacks) ---
+// --- Layer 2: Delivery (independent, exports escalation infra) ---
+// personaWorkflowArn is wired after PersonaStack creation via addEnvironment
 const delivery = new DeliveryStack(app, `Pulse-Delivery-${stage}`, { env, stage });
 
-// --- Layer 3: Persona (depends on Delivery for table name + SES domain) ---
+// --- Layer 3: Persona (depends on Delivery for table name + SES domain + escalation) ---
 const persona = new PersonaStack(app, `Pulse-Persona-${stage}`, {
   env,
   stage,
   deliveryTableName: delivery.deliveryTable.tableName,
   sesDomain: delivery.sesDomain,
+  escalationSchedulerArn: delivery.escalationSchedulerArn,
+  schedulerRoleArn: delivery.schedulerRoleArn,
+  schedulerGroupName: delivery.schedulerGroupName,
+  escalationHandlerArn: delivery.escalationHandlerArn,
 });
 persona.addDependency(delivery);
+
+// Wire persona workflow ARN back into escalation handler (breaks circular dep)
+delivery.escalationHandlerFn.addEnvironment('PERSONA_WORKFLOW_ARN', persona.personaWorkflow.stateMachineArn);
+delivery.escalationHandlerFn.addToRolePolicy(new iam.PolicyStatement({
+  actions: ['states:StartExecution'],
+  resources: [persona.personaWorkflow.stateMachineArn],
+}));
 
 // --- Layer 4: Intelligence (depends on Ingestion stream + Persona workflow) ---
 const intelligence = new IntelligenceStack(app, `Pulse-Intelligence-${stage}`, {
