@@ -5,6 +5,7 @@ import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as sns from 'aws-cdk-lib/aws-sns';
+import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import * as cr from 'aws-cdk-lib/custom-resources';
 import { Construct } from 'constructs';
 
@@ -12,10 +13,6 @@ export interface PersonaStackProps extends cdk.StackProps {
   stage: string;
   deliveryTableName: string;
   sesDomain: string;
-  escalationSchedulerArn?: string;
-  schedulerRoleArn?: string;
-  schedulerGroupName?: string;
-  escalationHandlerArn?: string;
   callbackApiUrl?: string;
 }
 
@@ -27,6 +24,8 @@ export class PersonaStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: PersonaStackProps) {
     super(scope, id, props);
 
+    const schedulerGroupName = `pulse-escalations-${props.stage}`;
+
     // --- Persona DynamoDB Table ---
     this.personaTable = new dynamodb.Table(this, 'PersonaTable', {
       tableName: `pulse-personas-${props.stage}`,
@@ -35,7 +34,6 @@ export class PersonaStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // GSI for lookups by role template
     this.personaTable.addGlobalSecondaryIndex({
       indexName: 'by-role-template',
       partitionKey: { name: 'roleTemplate', type: dynamodb.AttributeType.STRING },
@@ -101,7 +99,6 @@ export class PersonaStack extends cdk.Stack {
     });
     this.personaTable.grantReadData(contentTransformer);
 
-    // Bedrock invoke permission
     contentTransformer.addToRolePolicy(new iam.PolicyStatement({
       actions: ['bedrock:InvokeModel'],
       resources: ['*'],
@@ -158,12 +155,82 @@ export class PersonaStack extends cdk.Stack {
       resources: [`arn:aws:dynamodb:*:*:table/${props.deliveryTableName}`],
     }));
 
-    // --- Schedule Escalation Lambda (imported from DeliveryStack) ---
-    const scheduleEscalationFn = props.escalationSchedulerArn
-      ? lambda.Function.fromFunctionArn(this, 'ScheduleEscalationImport', props.escalationSchedulerArn)
-      : undefined;
+    // ===== Escalation Engine (owned by PersonaStack to avoid circular dep) =====
 
-    // --- Step Functions Workflow ---
+    // --- EventBridge Scheduler Group ---
+    new scheduler.CfnScheduleGroup(this, 'EscalationSchedulerGroup', {
+      name: schedulerGroupName,
+    });
+
+    // --- Escalation Handler Lambda ---
+    // The workflow ARN is set below after the state machine is created (same stack, no cycle)
+    const escalationHandler = new lambda.Function(this, 'EscalationHandler', {
+      functionName: `pulse-escalation-handler-${props.stage}`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'escalation_handler.handler',
+      code: lambda.Code.fromAsset('../src/delivery'),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        DELIVERY_TABLE_NAME: props.deliveryTableName,
+        PERSONA_WORKFLOW_ARN: '', // Set after workflow creation below
+        SCHEDULER_GROUP_NAME: schedulerGroupName,
+        STAGE: props.stage,
+      },
+    });
+
+    escalationHandler.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      resources: [`arn:aws:dynamodb:*:*:table/${props.deliveryTableName}`],
+    }));
+
+    escalationHandler.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['scheduler:DeleteSchedule'],
+      resources: [`arn:aws:scheduler:*:*:schedule/${schedulerGroupName}/*`],
+    }));
+
+    // --- IAM Role for EventBridge Scheduler to invoke escalation handler ---
+    const schedulerRole = new iam.Role(this, 'EscalationSchedulerRole', {
+      roleName: `pulse-scheduler-role-${props.stage}`,
+      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
+      description: 'Allows EventBridge Scheduler to invoke escalation handler Lambda',
+    });
+
+    schedulerRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['lambda:InvokeFunction'],
+      resources: [escalationHandler.functionArn],
+    }));
+
+    // --- Schedule Escalation Lambda ---
+    const scheduleEscalation = new lambda.Function(this, 'ScheduleEscalation', {
+      functionName: `pulse-schedule-escalation-${props.stage}`,
+      runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'schedule_escalation.handler',
+      code: lambda.Code.fromAsset('../src/delivery'),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(15),
+      memorySize: 256,
+      environment: {
+        DELIVERY_TABLE_NAME: props.deliveryTableName,
+        ESCALATION_FUNCTION_ARN: escalationHandler.functionArn,
+        SCHEDULER_ROLE_ARN: schedulerRole.roleArn,
+        SCHEDULER_GROUP_NAME: schedulerGroupName,
+        STAGE: props.stage,
+      },
+    });
+
+    scheduleEscalation.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['scheduler:CreateSchedule', 'scheduler:GetSchedule'],
+      resources: [`arn:aws:scheduler:*:*:schedule/${schedulerGroupName}/*`],
+    }));
+
+    scheduleEscalation.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['iam:PassRole'],
+      resources: [schedulerRole.roleArn],
+    }));
+
+    // ===== Step Functions Workflow =====
 
     // Step 1: Route signal to matching personas
     const routeStep = new tasks.LambdaInvoke(this, 'RouteToPersonas', {
@@ -177,7 +244,7 @@ export class PersonaStack extends cdk.Stack {
       outputPath: '$.Payload',
     });
 
-    // Step 3: Deliver - Map over transformations, branch by channel
+    // Step 3: Deliver - branch by channel, then schedule escalation
     const deliverEmailStep = new tasks.LambdaInvoke(this, 'DeliverEmail', {
       lambdaFunction: emailSender,
       resultPath: '$.deliveryResult',
@@ -188,6 +255,20 @@ export class PersonaStack extends cdk.Stack {
       resultPath: '$.deliveryResult',
     });
 
+    const scheduleEscalationStep = new tasks.LambdaInvoke(this, 'ScheduleEscalationStep', {
+      lambdaFunction: scheduleEscalation,
+      payload: sfn.TaskInput.fromObject({
+        'delivery.$': '$.delivery',
+        'signal.$': '$.signal',
+        'delivery_ids.$': '$.deliveryResult.Payload.delivery_ids',
+      }),
+      outputPath: '$.Payload',
+    });
+
+    // After delivery → schedule escalation
+    deliverEmailStep.next(scheduleEscalationStep);
+    deliverSlackStep.next(scheduleEscalationStep);
+
     // Channel choice: route to email or slack based on delivery.channel
     const channelChoice = new sfn.Choice(this, 'ChooseChannel')
       .when(
@@ -195,30 +276,6 @@ export class PersonaStack extends cdk.Stack {
         deliverSlackStep,
       )
       .otherwise(deliverEmailStep);
-
-    // After delivery, schedule escalation if configured
-    let postDeliveryChain: sfn.IChainable;
-
-    if (scheduleEscalationFn) {
-      const scheduleEscalationStep = new tasks.LambdaInvoke(this, 'ScheduleEscalation', {
-        lambdaFunction: scheduleEscalationFn,
-        payload: sfn.TaskInput.fromObject({
-          'delivery.$': '$.delivery',
-          'signal.$': '$.signal',
-          'delivery_ids.$': '$.deliveryResult.Payload.delivery_ids',
-        }),
-        outputPath: '$.Payload',
-      });
-
-      // After email delivery → schedule escalation
-      deliverEmailStep.next(scheduleEscalationStep);
-      // After slack delivery → schedule escalation
-      deliverSlackStep.next(scheduleEscalationStep);
-
-      postDeliveryChain = channelChoice;
-    } else {
-      postDeliveryChain = channelChoice;
-    }
 
     // Map state iterates over transformations (persona × channel)
     const deliverMap = new sfn.Map(this, 'DeliverToRecipients', {
@@ -229,9 +286,9 @@ export class PersonaStack extends cdk.Stack {
       },
       maxConcurrency: 5,
     });
-    deliverMap.itemProcessor(postDeliveryChain);
+    deliverMap.itemProcessor(channelChoice);
 
-    // Wire: Route → Transform → Deliver (map with channel branching)
+    // Wire: Route → Transform → Map[Channel → Deliver → ScheduleEscalation]
     const definition = routeStep
       .next(transformStep)
       .next(deliverMap);
@@ -241,6 +298,13 @@ export class PersonaStack extends cdk.Stack {
       definitionBody: sfn.DefinitionBody.fromChainable(definition),
       timeout: cdk.Duration.minutes(5),
     });
+
+    // Now wire the workflow ARN into the escalation handler (same stack, no cycle)
+    escalationHandler.addEnvironment('PERSONA_WORKFLOW_ARN', this.personaWorkflow.stateMachineArn);
+    escalationHandler.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['states:StartExecution'],
+      resources: [this.personaWorkflow.stateMachineArn],
+    }));
 
     // --- Seed MVP personas via custom resource ---
     const seedPersonas = new cr.AwsCustomResource(this, 'SeedPersonas', {
@@ -323,5 +387,7 @@ export class PersonaStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'PersonaTableName', { value: this.personaTable.tableName });
     new cdk.CfnOutput(this, 'WorkflowArn', { value: this.personaWorkflow.stateMachineArn });
     new cdk.CfnOutput(this, 'ChatbotSnsTopicArn', { value: this.chatbotSnsTopic.topicArn });
+    new cdk.CfnOutput(this, 'EscalationHandlerArn', { value: escalationHandler.functionArn });
+    new cdk.CfnOutput(this, 'ScheduleEscalationArn', { value: scheduleEscalation.functionArn });
   }
 }

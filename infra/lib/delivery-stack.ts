@@ -2,8 +2,6 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
-import * as iam from 'aws-cdk-lib/aws-iam';
-import * as scheduler from 'aws-cdk-lib/aws-scheduler';
 import { Construct } from 'constructs';
 
 export interface DeliveryStackProps extends cdk.StackProps {
@@ -14,17 +12,12 @@ export interface DeliveryStackProps extends cdk.StackProps {
 export class DeliveryStack extends cdk.Stack {
   public readonly deliveryTable: dynamodb.Table;
   public readonly sesDomain: string;
-  public readonly escalationHandlerFn: lambda.Function;
-  public readonly escalationHandlerArn: string;
-  public readonly escalationSchedulerArn: string;
-  public readonly schedulerRoleArn: string;
-  public readonly schedulerGroupName: string;
+  public readonly callbackApiUrl: string;
 
   constructor(scope: Construct, id: string, props: DeliveryStackProps) {
     super(scope, id, props);
 
     this.sesDomain = props.sesDomain || `pulse-${props.stage}.example.com`;
-    this.schedulerGroupName = `pulse-escalations-${props.stage}`;
 
     // --- DeliveryRecords DynamoDB Table ---
     this.deliveryTable = new dynamodb.Table(this, 'DeliveryTable', {
@@ -97,92 +90,12 @@ export class DeliveryStack extends cdk.Stack {
     const actions = callbackApi.root.addResource('v1').addResource('actions');
     const actionProxy = actions.addResource('{deliveryId}').addResource('{action}');
     actionProxy.addMethod('POST', new apigateway.LambdaIntegration(actionCallback));
-    // Also support GET for email link clicks
     actionProxy.addMethod('GET', new apigateway.LambdaIntegration(actionCallback));
 
-    // --- EventBridge Scheduler Group for escalations ---
-    const schedulerGroup = new scheduler.CfnScheduleGroup(this, 'EscalationSchedulerGroup', {
-      name: this.schedulerGroupName,
-    });
-
-    // --- Escalation Handler Lambda ---
-    const escalationHandler = new lambda.Function(this, 'EscalationHandler', {
-      functionName: `pulse-escalation-handler-${props.stage}`,
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'escalation_handler.handler',
-      code: lambda.Code.fromAsset('../src/delivery'),
-      layers: [sharedLayer],
-      timeout: cdk.Duration.seconds(30),
-      memorySize: 256,
-      environment: {
-        DELIVERY_TABLE_NAME: this.deliveryTable.tableName,
-        PERSONA_WORKFLOW_ARN: '', // Wired post-construction from app.ts
-        SCHEDULER_GROUP_NAME: this.schedulerGroupName,
-        STAGE: props.stage,
-      },
-    });
-
-    this.deliveryTable.grantReadWriteData(escalationHandler);
-    this.escalationHandlerFn = escalationHandler;
-    this.escalationHandlerArn = escalationHandler.functionArn;
-
-    // Permission to delete EventBridge Scheduler schedules (cleanup)
-    escalationHandler.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['scheduler:DeleteSchedule'],
-      resources: [`arn:aws:scheduler:*:*:schedule/${this.schedulerGroupName}/*`],
-    }));
-
-    // --- IAM Role for EventBridge Scheduler to invoke escalation handler ---
-    const schedulerRole = new iam.Role(this, 'EscalationSchedulerRole', {
-      roleName: `pulse-scheduler-role-${props.stage}`,
-      assumedBy: new iam.ServicePrincipal('scheduler.amazonaws.com'),
-      description: 'Allows EventBridge Scheduler to invoke escalation handler Lambda',
-    });
-
-    schedulerRole.addToPolicy(new iam.PolicyStatement({
-      actions: ['lambda:InvokeFunction'],
-      resources: [escalationHandler.functionArn],
-    }));
-
-    this.schedulerRoleArn = schedulerRole.roleArn;
-
-    // --- Schedule Escalation Lambda ---
-    const scheduleEscalation = new lambda.Function(this, 'ScheduleEscalation', {
-      functionName: `pulse-schedule-escalation-${props.stage}`,
-      runtime: lambda.Runtime.PYTHON_3_12,
-      handler: 'schedule_escalation.handler',
-      code: lambda.Code.fromAsset('../src/delivery'),
-      layers: [sharedLayer],
-      timeout: cdk.Duration.seconds(15),
-      memorySize: 256,
-      environment: {
-        DELIVERY_TABLE_NAME: this.deliveryTable.tableName,
-        ESCALATION_FUNCTION_ARN: escalationHandler.functionArn,
-        SCHEDULER_ROLE_ARN: schedulerRole.roleArn,
-        SCHEDULER_GROUP_NAME: this.schedulerGroupName,
-        STAGE: props.stage,
-      },
-    });
-
-    this.escalationSchedulerArn = scheduleEscalation.functionArn;
-
-    // Permission to create EventBridge Scheduler schedules
-    scheduleEscalation.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['scheduler:CreateSchedule', 'scheduler:GetSchedule'],
-      resources: [`arn:aws:scheduler:*:*:schedule/${this.schedulerGroupName}/*`],
-    }));
-
-    // Permission to pass the scheduler role
-    scheduleEscalation.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['iam:PassRole'],
-      resources: [schedulerRole.roleArn],
-    }));
+    this.callbackApiUrl = callbackApi.url;
 
     // --- Outputs ---
     new cdk.CfnOutput(this, 'DeliveryTableName', { value: this.deliveryTable.tableName });
     new cdk.CfnOutput(this, 'CallbackApiUrl', { value: callbackApi.url });
-    new cdk.CfnOutput(this, 'EscalationHandlerArn', { value: escalationHandler.functionArn });
-    new cdk.CfnOutput(this, 'ScheduleEscalationArn', { value: scheduleEscalation.functionArn });
-    new cdk.CfnOutput(this, 'SchedulerRoleArn', { value: schedulerRole.roleArn });
   }
 }
