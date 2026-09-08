@@ -2,6 +2,10 @@ name: Deploy Dev
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/deploy-dev.trigger'
 
 permissions:
   id-token: write
