@@ -6,7 +6,7 @@ Updated 8 September 2026. Branch: `review/verify-core-flows`, [pull request #1](
 
 The application and Python SDK have **100% statement coverage**, enforced by CI with `--cov-fail-under=100`. There are no coverage omissions or `pragma: no cover` exceptions. This is **not** 100% branch coverage, a claim of zero defects, completion of the engineering specification, or certification of a deployed AWS system.
 
-Local acceptance checks cover 183 Python tests, nine infrastructure contracts, TypeScript compilation, six synthesized stacks and imports of all 21 packaged Python Lambda handlers using only their deployment assets. AWS interactions use Moto, mocks or SDK schema validation. No live notifications, deployment, merge, load test or model-quality evaluation has been performed.
+Local acceptance checks cover 183 Python tests, nine infrastructure contracts, TypeScript compilation, six synthesized stacks and imports of all 21 packaged Python Lambda handlers using only their deployment assets. AWS interactions use Moto, mocks or SDK schema validation. The reviewed changes have been merged, but no successful live AWS deployment, live notification, load test or model-quality evaluation has been performed.
 
 ## Repairs completed
 
