@@ -1,16 +1,17 @@
 # Pulse Load Testing
 
+> Current implementation limits and authentication changes: see the [code and feature review](../../docs/review.md). Earlier examples and target-state claims must be read with that review.
 Load tests for the AWS Pulse Publish API using [Locust](https://locust.io/).
 
 ## Prerequisites
 
 ```bash
-pip install locust
+pip install locust boto3
 ```
 
 ## Configuration
 
-Set environment variables:
+Use an AWS profile/session with execute-api:Invoke permission, set AWS_DEFAULT_REGION to the deployment region, then set environment variables. Requests are SigV4-signed and require the API usage key:
 
 ```bash
 export PULSE_API_KEY="your-api-key-here"    # From CDK output: ApiKeyId
@@ -89,6 +90,6 @@ Add to your CI pipeline:
 ```yaml
 load-test:
   script:
-    - pip install locust
+    - pip install locust boto3
     - locust -f tests/load/locustfile.py --headless -u 50 -r 10 --run-time 2m --host $PULSE_API_HOST --exit-code-on-error 1
 ```

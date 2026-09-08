@@ -1,5 +1,4 @@
 """Audience Router - matches signals to personas based on audience hints, subscriptions, and suppression rules."""
-import json
 import os
 from typing import Optional
 import boto3
@@ -52,6 +51,12 @@ def handler(event, context):
         logger.error("missing_signal_data")
         return {"signal": signal_data, "persona_ids": []}
 
+    if signal_data.get("_escalation"):
+        targets = signal_data.get("audience_hint", {}).get("personas", [])
+        table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
+        valid = [pid for pid in dict.fromkeys(targets) if table.get_item(Key={"personaId": pid}).get("Item")]
+        return {"signal": signal_data, "persona_ids": valid}
+
     signal_id = signal_data.get("signal_id", "unknown")
     matched_personas = set()
 
@@ -100,6 +105,8 @@ def handler(event, context):
 
 def _resolve_persona_hint(hint: str) -> Optional[str]:
     """Resolve a role hint string to a persona ID."""
+    if hint.startswith("persona-"):
+        return hint
     hint_lower = hint.lower()
     mapping = {
         "ciso": "persona-ciso",
@@ -215,7 +222,7 @@ def _signal_matches_subscription(signal_data: dict, sub_filter: dict) -> bool:
     # Check regions
     if "regions" in sub_filter:
         signal_region = signal_data.get("context", {}).get("region", "")
-        if signal_region and signal_region not in sub_filter["regions"]:
+        if signal_region not in sub_filter["regions"]:
             return False
 
     # Check tags
@@ -228,7 +235,7 @@ def _signal_matches_subscription(signal_data: dict, sub_filter: dict) -> bool:
     # Check signal_types
     if "signal_types" in sub_filter:
         signal_type = signal_data.get("signal_type", "")
-        if signal_type and signal_type not in sub_filter["signal_types"]:
+        if signal_type not in sub_filter["signal_types"]:
             return False
 
     # Check keywords (any keyword in title or raw_detail)

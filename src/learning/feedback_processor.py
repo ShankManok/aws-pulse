@@ -3,10 +3,9 @@
 When a delivery record's feedback field is updated (useful/noise/escalate),
 aggregates per-persona suppression patterns and updates suppression rules.
 """
-import json
+from decimal import Decimal
 import os
 from datetime import datetime, timedelta
-from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
@@ -51,7 +50,6 @@ def handler(event, context):
             persona_id = _get_str(new_image, "personaId")
             signal_id = _get_str(new_image, "signalId")
             delivery_id = _get_str(new_image, "deliveryId")
-            channel = _get_str(new_image, "channel")
 
             logger.info(
                 "feedback_received",
@@ -94,11 +92,8 @@ def _check_noise_suppression(
     Queries recent deliveries for this persona marked as noise from the same source.
     If count >= NOISE_THRESHOLD within WINDOW_DAYS, create a suppression rule.
     """
-    # We need the signal source - stored in the delivery record or look up via signal
-    # For now, we extract source from signalId pattern or query delivery records
-    # The signal source is not stored on delivery records, so we'll use a
-    # heuristic: query all noise-marked deliveries for this persona in the window
-    # and group by source pattern in the signalId
+    # Delivery records now retain their actual source. Legacy rows without one
+    # cannot safely contribute evidence to a suppression rule.
 
     # Query deliveries for this persona with feedback=noise in recent window
     window_start = (datetime.utcnow() - timedelta(days=WINDOW_DAYS)).isoformat() + "Z"
@@ -118,14 +113,12 @@ def _check_noise_suppression(
 
         noise_items = response.get("Items", [])
 
-        # Group by source prefix (extract from signalId or use channel as proxy)
-        # In production, we'd join with signal table. For MVP, use signalId prefix grouping
+        # Count noise separately for each concrete source.
         source_counts: dict[str, int] = {}
         for item in noise_items:
-            # Use the first segment of signalId as a source proxy
-            sid = item.get("signalId", "")
-            # Better: store source on delivery record in future. For now count all noise.
-            source_key = "all"  # MVP: single bucket per persona
+            source_key = item.get("signalSource", "")
+            if not source_key or source_key == "all":
+                continue
             source_counts[source_key] = source_counts.get(source_key, 0) + 1
 
         # Check threshold
@@ -151,7 +144,7 @@ def _create_suppression_rule(persona_table, persona_id: str, source_key: str, no
         "id": rule_id,
         "source": "learned",
         "pattern": {"source_key": source_key, "noise_count": noise_count},
-        "confidence": min(noise_count / (NOISE_THRESHOLD * 2), 1.0),
+        "confidence": Decimal(str(min(noise_count / (NOISE_THRESHOLD * 2), 1.0))),
         "createdAt": now,
         "expiresAt": (datetime.utcnow() + timedelta(days=WINDOW_DAYS)).isoformat() + "Z",
     }

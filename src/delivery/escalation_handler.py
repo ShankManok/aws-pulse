@@ -1,4 +1,5 @@
 """Escalation Handler - checks if delivery was acknowledged and escalates if not."""
+import hashlib
 import json
 import os
 from datetime import datetime
@@ -89,8 +90,9 @@ def handler(event, context):
 
     # Re-invoke persona workflow for the next persona in chain
     workflow_arn = os.environ.get("PERSONA_WORKFLOW_ARN", "")
-    if workflow_arn:
-        _trigger_escalation_workflow(workflow_arn, signal_data, next_persona_id)
+    if not workflow_arn:
+        raise RuntimeError("PERSONA_WORKFLOW_ARN is required for escalation")
+    _trigger_escalation_workflow(workflow_arn, signal_data, next_persona_id)
 
     # Clean up the one-time schedule
     _cleanup_schedule(schedule_name)
@@ -138,7 +140,8 @@ def _trigger_escalation_workflow(workflow_arn: str, signal_data: dict, next_pers
         }
         signal_data_copy["_escalation"] = True
 
-        execution_name = f"esc-{next_persona_id}-{int(datetime.utcnow().timestamp())}"
+        execution_key = f"{signal_data.get('signal_id', '')}:{next_persona_id}"
+        execution_name = "esc-" + hashlib.sha256(execution_key.encode()).hexdigest()
         execution_name = execution_name[:80].replace(".", "-")
 
         sfn_client.start_execution(
@@ -157,6 +160,7 @@ def _trigger_escalation_workflow(workflow_arn: str, signal_data: dict, next_pers
         logger.warning("escalation_execution_exists", persona_id=next_persona_id)
     except Exception as e:
         logger.error("escalation_workflow_failed", persona_id=next_persona_id, error=str(e))
+        raise
 
 
 def _cleanup_schedule(schedule_name: str):

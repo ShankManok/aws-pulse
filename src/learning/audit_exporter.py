@@ -21,7 +21,6 @@ def handler(event, context):
     Exports delivery records from the previous hour to S3 in JSON Lines format.
     Partitioned as: audit/year=YYYY/month=MM/day=DD/hour=HH/records.jsonl
     """
-    stage = os.environ.get("STAGE", Config.STAGE)
     bucket_name = os.environ.get("AUDIT_BUCKET_NAME", "")
     delivery_table_name = os.environ.get("DELIVERY_TABLE_NAME", Config.DELIVERY_TABLE_NAME)
 

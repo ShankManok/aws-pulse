@@ -14,6 +14,9 @@ Headless (CI):
 """
 import json
 import random
+import boto3
+from botocore.auth import SigV4Auth
+from botocore.awsrequest import AWSRequest
 import time
 import uuid
 
@@ -104,11 +107,20 @@ class PulsePublishUser(HttpUser):
     def on_start(self):
         """Set API key header (get from environment or use test key)."""
         import os
-        self.api_key = os.environ.get("PULSE_API_KEY", "test-api-key")
+        self.api_key = os.environ["PULSE_API_KEY"]
+        self.aws_session = boto3.Session()
         self.headers = {
             "Content-Type": "application/json",
             "x-api-key": self.api_key,
         }
+
+    def _signed_headers(self, payload):
+        request = AWSRequest(method="POST", url=f"{self.host.rstrip('/')}/v1/signals",
+                             headers=self.headers, data=json.dumps(payload))
+        credentials = self.aws_session.get_credentials()
+        SigV4Auth(credentials.get_frozen_credentials(), "execute-api",
+                  self.aws_session.region_name or "ap-southeast-1").add_auth(request)
+        return dict(request.headers)
 
     @task(8)
     def publish_signal(self):
@@ -117,7 +129,7 @@ class PulsePublishUser(HttpUser):
         with self.client.post(
             "/v1/signals",
             json=payload,
-            headers=self.headers,
+            headers=self._signed_headers(payload),
             catch_response=True,
         ) as response:
             if response.status_code == 201:
@@ -138,7 +150,7 @@ class PulsePublishUser(HttpUser):
         with self.client.post(
             "/v1/signals",
             json=payload,
-            headers=self.headers,
+            headers=self._signed_headers(payload),
             catch_response=True,
         ) as response:
             if response.status_code == 201:
@@ -156,7 +168,7 @@ class PulsePublishUser(HttpUser):
             self.client.post(
                 "/v1/signals",
                 json=payload,
-                headers=self.headers,
+                headers=self._signed_headers(payload),
                 name="/v1/signals [burst]",
             )
 
@@ -169,7 +181,7 @@ def on_test_stop(environment, **kwargs):
     stats = environment.runner.stats
     total = stats.total
     print(f"\n{'='*60}")
-    print(f"LOAD TEST SUMMARY")
+    print("LOAD TEST SUMMARY")
     print(f"{'='*60}")
     print(f"Total requests: {total.num_requests}")
     print(f"Failures: {total.num_failures}")

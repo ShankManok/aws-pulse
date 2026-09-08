@@ -20,12 +20,12 @@ jobs:
       - name: Install dependencies
         run: |
           pip install -r requirements.txt -r requirements-dev.txt
-          cd infra && npm ci
+          npm ci
       - name: Lint
         run: |
           ruff check src/ tests/
-          cd infra && npx eslint lib/
+          npm run build --workspace infra
       - name: Unit Tests
-        run: pytest tests/unit/ -v --cov=src --cov-report=xml
+        run: pytest tests/unit/ tests/integration/ -v --cov=src --cov-report=xml
       - name: CDK Synth
-        run: cd infra && npx cdk synth
+        run: npm test

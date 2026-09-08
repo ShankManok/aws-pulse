@@ -322,11 +322,17 @@ export class PersonaStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(5),
     });
 
-    // Now wire the workflow ARN into the escalation handler (same stack, no cycle)
-    escalationHandler.addEnvironment('PERSONA_WORKFLOW_ARN', this.personaWorkflow.stateMachineArn);
+    // Use the known physical name to avoid a CloudFormation dependency cycle:
+    // workflow -> schedule Lambda -> escalation Lambda -> workflow.
+    const workflowArn = this.formatArn({
+      service: 'states', resource: 'stateMachine',
+      resourceName: `pulse-persona-workflow-${props.stage}`,
+      arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+    });
+    escalationHandler.addEnvironment('PERSONA_WORKFLOW_ARN', workflowArn);
     escalationHandler.addToRolePolicy(new iam.PolicyStatement({
       actions: ['states:StartExecution'],
-      resources: [this.personaWorkflow.stateMachineArn],
+      resources: [workflowArn],
     }));
 
     // --- Seed MVP personas via custom resource ---
@@ -439,7 +445,9 @@ export class PersonaStack extends cdk.Stack {
     const personasResource = personaApi.root.addResource('v1').addResource('personas');
     const personaIdResource = personasResource.addResource('{personaId}');
     const subscribeResource = personaIdResource.addResource('subscribe');
-    subscribeResource.addMethod('POST', new apigateway.LambdaIntegration(subscriptionAgent));
+    subscribeResource.addMethod('POST', new apigateway.LambdaIntegration(subscriptionAgent), {
+      authorizationType: apigateway.AuthorizationType.IAM,
+    });
 
     // --- Outputs ---
     new cdk.CfnOutput(this, 'PersonaTableName', { value: this.personaTable.tableName });

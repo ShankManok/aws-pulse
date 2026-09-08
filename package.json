@@ -8,7 +8,7 @@
   ],
   "scripts": {
     "test": "cd infra && npm test",
-    "synth": "cd infra && npx cdk synth",
-    "deploy": "cd infra && npx cdk deploy --all"
+    "synth": "npm run build --workspace infra && cd infra && cdk synth",
+    "deploy": "npm run build --workspace infra && cd infra && cdk deploy --all"
   }
 }

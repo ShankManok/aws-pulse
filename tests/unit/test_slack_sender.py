@@ -120,11 +120,8 @@ class TestSlackSender:
 
         from src.delivery.slack_sender import handler
 
-        result = handler(sample_event, None)
-
-        assert result["delivered"] is False
-        assert len(result["failed"]) == 1
-        assert "SNS throttled" in result["failed"][0]["error"]
+        with pytest.raises(RuntimeError, match="Delivery failed"):
+            handler(sample_event, None)
 
     def test_multiple_recipients(self, mock_dynamodb, mock_sns, sample_event):
         """Should send to multiple Slack channels."""

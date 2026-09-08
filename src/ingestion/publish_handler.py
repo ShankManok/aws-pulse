@@ -4,6 +4,7 @@ import os
 import boto3
 import structlog
 from shared.models import SignalEvent
+from pydantic import ValidationError
 
 logger = structlog.get_logger()
 kinesis = boto3.client("kinesis")
@@ -14,6 +15,9 @@ def handler(event, context):
     """Handle POST /v1/signals requests."""
     try:
         body = json.loads(event.get("body", "{}"))
+
+        if not isinstance(body, dict):
+            return {"statusCode": 400, "body": json.dumps({"error": "Expected a JSON object"})}
 
         # Validate and create signal event
         signal = SignalEvent(
@@ -26,16 +30,16 @@ def handler(event, context):
             correlation=body.get("correlation", {}),
         )
 
-        # Write to Kinesis for processing pipeline
-        kinesis.put_record(
-            StreamName=os.environ["SIGNAL_STREAM_NAME"],
-            Data=json.dumps(signal.to_dynamo()),
-            PartitionKey=signal.context.account_id or signal.signal_id,
-        )
-
         # Write to DynamoDB for persistence
         table = dynamodb.Table(os.environ["SIGNAL_TABLE_NAME"])
         table.put_item(Item=signal.to_dynamo())
+
+        # Write to Kinesis for processing pipeline
+        kinesis.put_record(
+            StreamName=os.environ["SIGNAL_STREAM_NAME"],
+            Data=json.dumps(signal.to_event()),
+            PartitionKey=signal.context.account_id or signal.signal_id,
+        )
 
         logger.info("signal_ingested", signal_id=signal.signal_id, source=signal.source)
 
@@ -47,6 +51,8 @@ def handler(event, context):
             }),
         }
 
+    except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
+        return {"statusCode": 400, "body": json.dumps({"error": "Invalid signal payload"})}
     except KeyError as e:
         return {"statusCode": 400, "body": json.dumps({"error": f"Missing field: {e}"})}
     except Exception as e:

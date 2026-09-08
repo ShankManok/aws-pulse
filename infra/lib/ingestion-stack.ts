@@ -10,6 +10,7 @@ import { Construct } from 'constructs';
 
 export interface IngestionStackProps extends cdk.StackProps {
   stage: string;
+  organizationId?: string;
 }
 
 export class IngestionStack extends cdk.Stack {
@@ -119,6 +120,7 @@ export class IngestionStack extends cdk.Stack {
     const signals = v1.addResource('signals');
     signals.addMethod('POST', new apigateway.LambdaIntegration(publishHandler), {
       apiKeyRequired: true,
+      authorizationType: apigateway.AuthorizationType.IAM,
     });
 
     // ===== Webhook Adapters =====
@@ -188,6 +190,7 @@ export class IngestionStack extends cdk.Stack {
       timeout: cdk.Duration.seconds(15),
       memorySize: 256,
       environment: {
+        AWS_ACCOUNT_ID: this.account,
         SIGNAL_STREAM_NAME: this.signalStream.streamName,
         SIGNAL_TABLE_NAME: this.signalTable.tableName,
         STAGE: props.stage,
@@ -196,49 +199,32 @@ export class IngestionStack extends cdk.Stack {
     this.signalStream.grantWrite(orgForwarder);
     this.signalTable.grantWriteData(orgForwarder);
 
-    // EventBridge rule to route cross-account events to org forwarder
-    const crossAccountRule = new events.Rule(this, 'CrossAccountEventRule', {
-      ruleName: `pulse-cross-account-${props.stage}`,
-      description: 'Routes cross-account operational events to org forwarder',
+    // One route for local and forwarded events; prevents duplicate raw/normalized records.
+    new events.Rule(this, 'NativeEventRule', {
       eventPattern: {
-        source: ['aws.cloudwatch', 'aws.securityhub', 'aws.health', 'aws.guardduty'],
-        // Only match events from OTHER accounts (cross-account forwarded)
-        account: [{ 'anything-but': cdk.Aws.ACCOUNT_ID }] as any,
+        source: ['aws.cloudwatch', 'aws.securityhub', 'aws.health', 'aws.guardduty', 'aws.config'],
       },
+      targets: [new targets.LambdaFunction(orgForwarder)],
     });
-    crossAccountRule.addTarget(new targets.LambdaFunction(orgForwarder));
 
-    // Resource policy on default event bus to accept cross-account events
-    new events.CfnEventBusPolicy(this, 'CrossAccountBusPolicy', {
-      statementId: `pulse-cross-account-allow-${props.stage}`,
-      action: 'events:PutEvents',
-      principal: '*',
-      condition: {
-        type: 'StringEquals',
-        key: 'aws:PrincipalOrgID',
-        value: cdk.Aws.ORGANIZATION_ID || '*', // Will be org ID at deploy time
-      },
-    });
+    // Cross-account ingestion is opt-in and limited to an explicit organization.
+    if (props.organizationId) {
+      if (!/^o-[a-z0-9]{10,32}$/.test(props.organizationId)) {
+        throw new Error('organizationId must be an AWS Organizations ID');
+      }
+      new events.CfnEventBusPolicy(this, 'CrossAccountBusPolicy', {
+        statementId: `pulse-cross-account-allow-${props.stage}`,
+        action: 'events:PutEvents',
+        principal: '*',
+        condition: { type: 'StringEquals', key: 'aws:PrincipalOrgID', value: props.organizationId },
+      });
+    }
 
     // Webhook API endpoints
     const webhooks = v1.addResource('webhooks');
     webhooks.addResource('pagerduty').addMethod('POST', new apigateway.LambdaIntegration(pagerdutyAdapter));
     webhooks.addResource('datadog').addMethod('POST', new apigateway.LambdaIntegration(datadogAdapter));
     webhooks.addResource('servicenow').addMethod('POST', new apigateway.LambdaIntegration(servicenowAdapter));
-
-    // ===== EventBridge rules for AWS service signals =====
-
-    new events.Rule(this, 'CloudWatchAlarmRule', {
-      eventPattern: { source: ['aws.cloudwatch'], detailType: ['CloudWatch Alarm State Change'] },
-    }).addTarget(new targets.KinesisStream(this.signalStream));
-
-    new events.Rule(this, 'SecurityHubRule', {
-      eventPattern: { source: ['aws.securityhub'], detailType: ['Security Hub Findings - Imported'] },
-    }).addTarget(new targets.KinesisStream(this.signalStream));
-
-    new events.Rule(this, 'HealthRule', {
-      eventPattern: { source: ['aws.health'] },
-    }).addTarget(new targets.KinesisStream(this.signalStream));
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiUrl', { value: api.url });

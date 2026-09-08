@@ -16,12 +16,12 @@ def normalize_cloudwatch_alarm(event: dict) -> SignalEvent:
         severity=Severity(level=severity_map.get(state.get("value"), SeverityLevel.MEDIUM), score=70 if state.get("value") == "ALARM" else 20),
         content=SignalContent(
             title=f"CloudWatch Alarm: {detail.get('alarmName', 'Unknown')} - {state.get('value')}",
-            raw_detail=f"Alarm transitioned from {prev_state.get('value')} to {state.get('value')}. Reason: {state.get('reasonData', '')}",
+            raw_detail=f"Alarm transitioned from {prev_state.get('value')} to {state.get('value')}. Reason: {state.get('reason', state.get('reasonData', ''))}",
         ),
         context=SignalContext(
             account_id=event.get("account", ""),
             region=event.get("region", ""),
-            resource_arns=[detail.get("alarmArn", "")],
+            resource_arns=event.get("resources", []) or ([detail["alarmArn"]] if detail.get("alarmArn") else []),
         ),
     )
 

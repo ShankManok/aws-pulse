@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import time
+from urllib.parse import urlencode
 from typing import Any, Optional
 
 import botocore.auth
@@ -86,14 +87,16 @@ class _SigV4Auth:
         self._region = region
         self._service = service
         session = botocore.session.get_session()
-        self._credentials = session.get_credentials().get_frozen_credentials()
+        self._credentials = session.get_credentials()
+        if self._credentials is None:
+            raise ValueError("AWS credentials are required for SigV4 authentication")
 
     def sign_request(self, method: str, url: str, headers: dict, body: str = "") -> dict:
         """Add SigV4 authorization headers to the request."""
         from botocore.awsrequest import AWSRequest
 
         request = AWSRequest(method=method, url=url, headers=headers, data=body)
-        signer = botocore.auth.SigV4Auth(self._credentials, self._service, self._region)
+        signer = botocore.auth.SigV4Auth(self._credentials.get_frozen_credentials(), self._service, self._region)
         signer.add_auth(request)
         return dict(request.headers)
 
@@ -118,10 +121,12 @@ class PulseClient:
         region: str = "ap-southeast-1",
         max_retries: int = 3,
         timeout: int = 30,
+        api_key: Optional[str] = None,
     ):
         if not endpoint_url:
             raise ValueError("endpoint_url is required")
 
+        self._api_key = api_key
         self._endpoint = endpoint_url.rstrip("/")
         self._region = region
         self._max_retries = max_retries
@@ -298,10 +303,12 @@ class PulseClient:
         """Make an authenticated API request with retries."""
         url = f"{self._endpoint}{path}"
         headers = {"Content-Type": "application/json"}
+        if self._api_key:
+            headers["x-api-key"] = self._api_key
         body_str = json.dumps(body) if body else ""
 
         if params:
-            url += "?" + "&".join(f"{k}={v}" for k, v in params.items())
+            url += "?" + urlencode(params)
 
         last_error: Optional[Exception] = None
 

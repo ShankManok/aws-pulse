@@ -1,5 +1,6 @@
 # AWS Pulse Architecture
 
+> Current implementation limits and authentication changes: see the [code and feature review](review.md). Earlier examples and target-state claims must be read with that review.
 ## Overview
 
 AWS Pulse is an intelligent notification infrastructure that sits between AWS services (signal producers) and human consumers (personas). It ingests signals from multiple sources, correlates them, transforms content per-persona using AI, and delivers through the right channel at the right time.

@@ -7,7 +7,6 @@ Rules are evaluated in order; first match wins.
 """
 import os
 from datetime import datetime
-from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
@@ -36,6 +35,13 @@ def should_suppress(signal_data: dict, persona_config: dict) -> bool:
     now = datetime.utcnow()
 
     for rule in rules:
+        if rule.get("source") == "learned":
+            pattern = rule.get("pattern", {})
+            learned_source = pattern.get("source") or pattern.get("source_key")
+            if learned_source in (None, "", "all") or learned_source != source:
+                continue
+            if severity_level in ("critical", "high"):
+                continue
         # Skip expired rules
         expires_at = rule.get("expiresAt", "")
         if expires_at:
@@ -44,7 +50,7 @@ def should_suppress(signal_data: dict, persona_config: dict) -> bool:
                 if exp_dt < now:
                     continue
             except (ValueError, TypeError):
-                pass
+                continue
 
         # Evaluate rule pattern
         if _matches_rule(rule, source, severity_level, signal_type):
@@ -106,7 +112,6 @@ def recalculate_suppression_rules(persona_id: str) -> list[dict]:
         Updated list of suppression rules
     """
     persona_table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
-    delivery_table = dynamodb.Table(os.environ.get("DELIVERY_TABLE_NAME", Config.DELIVERY_TABLE_NAME))
 
     # Fetch current persona
     response = persona_table.get_item(Key={"personaId": persona_id})
@@ -128,7 +133,7 @@ def recalculate_suppression_rules(persona_id: str) -> list[dict]:
                     logger.info("pruned_expired_rule", persona_id=persona_id, rule_id=rule.get("id"))
                     continue
             except (ValueError, TypeError):
-                pass
+                continue
         active_rules.append(rule)
 
     # Step 2: Keep manual rules unchanged, only refresh learned ones

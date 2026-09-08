@@ -1,5 +1,7 @@
 """Pydantic data models for AWS Pulse."""
 from __future__ import annotations
+import json
+from decimal import Decimal
 from datetime import datetime
 from enum import Enum
 from typing import Optional
@@ -90,6 +92,18 @@ class SignalEvent(BaseModel):
     ingested_at: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z")
     correlation_group_id: Optional[str] = None
 
-    def to_dynamo(self) -> dict:
-        """Serialize for DynamoDB."""
+    def to_event(self) -> dict:
+        """Canonical snake_case wire format for Kinesis and Step Functions."""
         return self.model_dump(mode="json", exclude_none=True)
+
+    def to_dynamo(self) -> dict:
+        """Preserve canonical fields and supply the deployed table/index keys.
+
+        DynamoDB rejects floats, including nested prediction/structured values.
+        Keep those as Decimal only at the persistence boundary.
+        """
+        item = self.to_event()
+        item.update(signalId=self.signal_id, ingestedAt=self.ingested_at)
+        if self.correlation_group_id:
+            item["correlationGroupId"] = self.correlation_group_id
+        return json.loads(json.dumps(item), parse_float=Decimal)

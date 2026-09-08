@@ -1,5 +1,6 @@
 # Deployment Guide
 
+> Current implementation limits and authentication changes: see the [code and feature review](review.md). Earlier examples and target-state claims must be read with that review.
 ## Prerequisites
 
 - AWS CLI v2 configured with credentials

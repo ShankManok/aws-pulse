@@ -14,7 +14,7 @@ const stage = app.node.tryGetContext('stage') || 'dev';
 const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION || 'ap-southeast-1' };
 
 // --- Layer 1: Ingestion (no dependencies) ---
-const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, stage });
+const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, stage, organizationId: app.node.tryGetContext('organizationId') });
 
 // --- Layer 2: Delivery (no dependencies on other Pulse stacks) ---
 const delivery = new DeliveryStack(app, `Pulse-Delivery-${stage}`, { env, stage });

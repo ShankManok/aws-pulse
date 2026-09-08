@@ -7,7 +7,6 @@ Calculates per-org metrics:
 Publishes to CloudWatch custom namespace "Pulse/Analytics" and stores daily
 snapshots in pulse-analytics-{stage} DynamoDB table.
 """
-import json
 import os
 from datetime import datetime, timedelta
 from decimal import Decimal

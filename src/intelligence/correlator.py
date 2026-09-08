@@ -1,4 +1,5 @@
 """Correlation Engine - processes Kinesis stream records and routes signals to persona workflow."""
+import hashlib
 import json
 import os
 import base64
@@ -71,6 +72,7 @@ def handler(event, context):
                     )
                 except Exception as e:
                     logger.warning("signal_update_failed", signal_id=signal_id, error=str(e))
+                    raise
 
             # --- Trigger Persona Workflow ---
             if workflow_arn:
@@ -170,7 +172,7 @@ def _find_or_create_correlation_group(
 def _start_persona_workflow(workflow_arn: str, signal_data: dict, signal_id: str):
     """Start the persona Step Functions workflow for this signal."""
     try:
-        execution_name = f"{signal_id}-{int(datetime.utcnow().timestamp())}"
+        execution_name = "sig-" + hashlib.sha256(signal_id.encode()).hexdigest()
         # Step Functions execution names: max 80 chars, alphanumeric + hyphens + underscores
         execution_name = execution_name[:80].replace(".", "-")
 

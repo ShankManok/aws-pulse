@@ -103,7 +103,7 @@ export class IntelligenceStack extends cdk.Stack {
 
     props.signalStream.grantRead(correlator);
     this.correlationTable.grantReadWriteData(correlator);
-    props.signalTable.grantReadData(correlator);
+    props.signalTable.grantReadWriteData(correlator);
 
     correlator.addToRolePolicy(new iam.PolicyStatement({
       actions: ['states:StartExecution'],

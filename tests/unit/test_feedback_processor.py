@@ -2,7 +2,6 @@
 import os
 import pytest
 from unittest.mock import patch, MagicMock
-from datetime import datetime
 
 
 @pytest.fixture(autouse=True)
@@ -64,9 +63,9 @@ class TestFeedbackProcessor:
     def test_noise_feedback_triggers_suppression_check(self, mock_dynamodb, mock_cloudwatch):
         """Noise feedback should query delivery history for suppression."""
         mock_dynamodb.query.return_value = {"Items": [
-            {"signalId": "s1", "personaId": "persona-sre"},
-            {"signalId": "s2", "personaId": "persona-sre"},
-            {"signalId": "s3", "personaId": "persona-sre"},
+            {"signalId": "s1", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
+            {"signalId": "s2", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
+            {"signalId": "s3", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
         ]}
 
         from src.learning.feedback_processor import handler
@@ -83,8 +82,8 @@ class TestFeedbackProcessor:
     def test_noise_below_threshold_no_suppression(self, mock_dynamodb, mock_cloudwatch):
         """Below threshold noise count should not create suppression rule."""
         mock_dynamodb.query.return_value = {"Items": [
-            {"signalId": "s1", "personaId": "persona-sre"},
-            {"signalId": "s2", "personaId": "persona-sre"},
+            {"signalId": "s1", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
+            {"signalId": "s2", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
         ]}
 
         from src.learning.feedback_processor import handler

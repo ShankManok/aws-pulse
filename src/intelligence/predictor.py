@@ -260,7 +260,9 @@ def _score_from_hours(hours: float) -> int:
 
 def _publish_prediction(signal: SignalEvent, stream_name: str, signal_table):
     """Publish predictive signal to Kinesis and DynamoDB."""
-    signal_dict = signal.to_dynamo()
+    signal_dict = signal.to_event()
+
+    signal_table.put_item(Item=signal.to_dynamo())
 
     if stream_name:
         kinesis.put_record(
@@ -268,11 +270,6 @@ def _publish_prediction(signal: SignalEvent, stream_name: str, signal_table):
             Data=json.dumps(signal_dict),
             PartitionKey=signal.context.account_id or signal.signal_id,
         )
-
-    try:
-        signal_table.put_item(Item=signal_dict)
-    except Exception as e:
-        logger.warning("prediction_store_failed", signal_id=signal.signal_id, error=str(e))
 
     logger.info(
         "prediction_published",

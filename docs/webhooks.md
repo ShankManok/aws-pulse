@@ -1,5 +1,6 @@
 # Webhook Integration Guide
 
+> Current implementation limits and authentication changes: see the [code and feature review](review.md). Earlier examples and target-state claims must be read with that review.
 ## Overview
 
 Pulse accepts webhooks from PagerDuty, Datadog, and ServiceNow. Each webhook is

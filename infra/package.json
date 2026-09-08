@@ -4,7 +4,7 @@
   "scripts": {
     "build": "tsc",
     "cdk": "cdk",
-    "test": "jest"
+    "test": "npm run build && cdk synth --quiet && node --test tests/*.test.cjs"
   },
   "dependencies": {
     "aws-cdk-lib": "^2.150.0",

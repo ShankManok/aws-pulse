@@ -1,5 +1,4 @@
 """Content Transformer - generates persona-specific notification text via Bedrock."""
-import json
 import os
 import boto3
 import structlog
@@ -100,8 +99,7 @@ def handler(event, context):
             for channel in channels:
                 channel_recipients = recipients_by_channel.get(channel, [])
                 if not channel_recipients:
-                    # Fallback: use all members for this channel
-                    channel_recipients = [m.get("principalId") for m in members if m.get("principalId")]
+                    continue  # Respect member channel opt-outs.
 
                 entry = {
                     "persona_id": persona_id,
@@ -132,7 +130,7 @@ def handler(event, context):
                 signal_id=signal_data.get("signal_id"),
                 error=str(e),
             )
-            continue
+            raise
 
     return {"signal": signal_data, "transformations": results}
 

@@ -57,7 +57,11 @@ def handler(event, context):
     stream_name = os.environ.get("SIGNAL_STREAM_NAME", "")
     table_name = os.environ.get("SIGNAL_TABLE_NAME", "")
 
-    signal_dict = signal.to_dynamo()
+    signal_dict = signal.to_event()
+
+    if table_name:
+        table = dynamodb.Table(table_name)
+        table.put_item(Item=signal.to_dynamo())
 
     if stream_name:
         kinesis.put_record(
@@ -65,10 +69,6 @@ def handler(event, context):
             Data=json.dumps(signal_dict),
             PartitionKey=signal.context.account_id or signal.signal_id,
         )
-
-    if table_name:
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=signal_dict)
 
     logger.info("pagerduty_signal_ingested", signal_id=signal.signal_id, pd_event_type=event_type)
 
@@ -82,9 +82,9 @@ def _validate_signature(body: str, signature: str) -> bool:
     """Validate PagerDuty webhook signature using HMAC-SHA256."""
     secret = os.environ.get("PAGERDUTY_WEBHOOK_SECRET", "")
     if not secret:
-        # No secret configured - skip validation in dev
+        # An unconfigured integration must reject incoming requests.
         logger.warning("pagerduty_no_secret_configured")
-        return True
+        return False
 
     if not signature:
         return False

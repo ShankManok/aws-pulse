@@ -1,4 +1,5 @@
 """Datadog Webhook Adapter - normalizes Datadog alert webhooks to SignalEvent."""
+import hmac
 import json
 import os
 import boto3
@@ -53,7 +54,11 @@ def handler(event, context):
     stream_name = os.environ.get("SIGNAL_STREAM_NAME", "")
     table_name = os.environ.get("SIGNAL_TABLE_NAME", "")
 
-    signal_dict = signal.to_dynamo()
+    signal_dict = signal.to_event()
+
+    if table_name:
+        table = dynamodb.Table(table_name)
+        table.put_item(Item=signal.to_dynamo())
 
     if stream_name:
         kinesis.put_record(
@@ -61,10 +66,6 @@ def handler(event, context):
             Data=json.dumps(signal_dict),
             PartitionKey=signal.context.account_id or signal.signal_id,
         )
-
-    if table_name:
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=signal_dict)
 
     logger.info("datadog_signal_ingested", signal_id=signal.signal_id, alert_type=payload.get("alert_type"))
 
@@ -79,12 +80,12 @@ def _validate_api_key(api_key: str) -> bool:
     expected_key = os.environ.get("DATADOG_WEBHOOK_API_KEY", "")
     if not expected_key:
         logger.warning("datadog_no_api_key_configured")
-        return True  # Skip validation in dev
+        return False
 
     if not api_key:
         return False
 
-    return api_key == expected_key
+    return hmac.compare_digest(api_key, expected_key)
 
 
 def _normalize_alert(payload: dict) -> SignalEvent:

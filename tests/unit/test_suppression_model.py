@@ -45,7 +45,7 @@ class TestShouldSuppress:
             "suppressionRules": [{
                 "id": "learned-all-123",
                 "source": "learned",
-                "pattern": {"source_key": "all", "noise_count": 5},
+                "pattern": {"source_key": "aws.cloudwatch", "noise_count": 5},
                 "confidence": 0.7,
                 "expiresAt": (datetime.utcnow() + timedelta(days=10)).isoformat() + "Z",
             }],
@@ -63,7 +63,7 @@ class TestShouldSuppress:
             "suppressionRules": [{
                 "id": "learned-all-123",
                 "source": "learned",
-                "pattern": {"source_key": "all", "noise_count": 2},
+                "pattern": {"source_key": "aws.cloudwatch", "noise_count": 2},
                 "confidence": 0.3,
                 "expiresAt": (datetime.utcnow() + timedelta(days=10)).isoformat() + "Z",
             }],
@@ -81,7 +81,7 @@ class TestShouldSuppress:
             "suppressionRules": [{
                 "id": "learned-all-123",
                 "source": "learned",
-                "pattern": {"source_key": "all", "noise_count": 5},
+                "pattern": {"source_key": "aws.cloudwatch", "noise_count": 5},
                 "confidence": 0.9,
                 "expiresAt": (datetime.utcnow() - timedelta(days=1)).isoformat() + "Z",
             }],

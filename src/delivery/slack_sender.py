@@ -5,6 +5,7 @@ from datetime import datetime
 import boto3
 import structlog
 from shared.config import Config
+from shared.action_tokens import new_token, action_url
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -60,7 +61,7 @@ def handler(event, context):
 
     if not recipients:
         logger.warning("no_slack_recipients", persona_id=persona_id)
-        return {"statusCode": 200, "delivered": False, "error": "No recipients"}
+        return {"statusCode": 200, "delivered": False, "delivery_ids": [], "error": "No recipients"}
 
     signal_id = signal.get("signal_id", "unknown")
     severity = signal.get("severity", {})
@@ -72,7 +73,7 @@ def handler(event, context):
 
     sns_topic_arn = os.environ.get("CHATBOT_SNS_TOPIC_ARN", "")
     delivery_table_name = os.environ.get("DELIVERY_TABLE_NAME", Config.DELIVERY_TABLE_NAME)
-    callback_base = os.environ.get("CALLBACK_API_URL", "")
+    callback_base = os.environ.get("CALLBACK_API_URL", "").rstrip("/")
     table = dynamodb.Table(delivery_table_name)
 
     delivery_ids = []
@@ -81,6 +82,7 @@ def handler(event, context):
     for idx, recipient in enumerate(recipients):
         delivery_id = f"del-{signal_id}-{persona_id}-slack-{idx}"
 
+        token, token_hash = new_token()
         # Build Slack-formatted message via SNS
         slack_message = _build_slack_message(
             severity_level=severity_level,
@@ -90,6 +92,7 @@ def handler(event, context):
             account_id=account_id,
             region=region,
             delivery_id=delivery_id,
+            action_token=token,
             callback_base=callback_base,
         )
 
@@ -115,7 +118,10 @@ def handler(event, context):
             now = datetime.utcnow().isoformat() + "Z"
             table.put_item(Item={
                 "deliveryId": delivery_id,
+                "actionTokenHash": token_hash,
+                "actionTokenExpiresAt": int(datetime.utcnow().timestamp()) + 86400,
                 "signalId": signal_id,
+                "signalSource": source,
                 "personaId": persona_id,
                 "recipientId": recipient,
                 "channel": "slack",
@@ -130,6 +136,9 @@ def handler(event, context):
         except Exception as e:
             logger.error("slack_failed", error=str(e), recipient=recipient, signal_id=signal_id)
             failed.append({"recipient": recipient, "error": str(e)})
+
+    if failed:
+        raise RuntimeError(f"Delivery failed for {len(failed)} recipient(s)")
 
     return {
         "statusCode": 200,
@@ -148,14 +157,14 @@ def _build_slack_message(
     region: str,
     delivery_id: str,
     callback_base: str,
+    action_token: str = "",
 ) -> dict:
     """Build a Slack Block Kit message payload for AWS Chatbot."""
     emoji = SEVERITY_EMOJI.get(severity_level, ":bell:")
-    color = SEVERITY_COLORS.get(severity_level, "#6B7280")
 
-    ack_url = f"{callback_base}/v1/actions/{delivery_id}/acknowledge"
-    escalate_url = f"{callback_base}/v1/actions/{delivery_id}/escalate"
-    suppress_url = f"{callback_base}/v1/actions/{delivery_id}/suppress"
+    ack_url = action_url(callback_base, delivery_id, "acknowledge", action_token)
+    escalate_url = action_url(callback_base, delivery_id, "escalate", action_token)
+    suppress_url = action_url(callback_base, delivery_id, "suppress", action_token)
 
     return {
         "version": "1.0",

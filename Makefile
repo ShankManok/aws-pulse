@@ -9,27 +9,27 @@ test:
 	pytest tests/unit/ -v --cov=src --cov-report=term-missing
 
 test-integration:
-	pytest tests/integration/ -v --stage=dev
+	pytest tests/integration/ -v
 
 test-e2e:
-	pytest tests/e2e/ -v --stage=dev
+	@echo "Live E2E suite is not implemented; see docs/review.md"
+	@exit 1
 
 lint:
 	ruff check src/ tests/
-	ruff format --check src/ tests/
-	cd infra && npx eslint lib/
+	npm run build --workspace infra
 
 format:
 	ruff format src/ tests/
 
 synth:
-	cd infra && npx cdk synth
+	cd infra && npm run build && npx cdk synth
 
 deploy-dev:
-	cd infra && npx cdk deploy --all --context stage=dev --require-approval never
+	cd infra && npm run build && npx cdk deploy --all --context stage=dev --require-approval never
 
 deploy-prod:
-	cd infra && npx cdk deploy --all --context stage=prod
+	cd infra && npm run build && npx cdk deploy --all --context stage=prod
 
 clean:
 	rm -rf cdk.out/ node_modules/ .venv/ __pycache__/ .pytest_cache/ htmlcov/

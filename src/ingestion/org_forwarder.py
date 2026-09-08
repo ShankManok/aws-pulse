@@ -16,6 +16,10 @@ from shared.models import (
     SignalContext, AudienceHint, SignalType,
 )
 from shared.config import Config
+try:
+    from normalizer import normalize_cloudwatch_alarm, normalize_security_hub_finding
+except ModuleNotFoundError:
+    from ingestion.normalizer import normalize_cloudwatch_alarm, normalize_security_hub_finding
 
 logger = structlog.get_logger()
 kinesis = boto3.client("kinesis")
@@ -62,8 +66,20 @@ def handler(event, context):
         region=region,
     )
 
-    # Normalize to SignalEvent
-    signal = _normalize_event(source, detail_type, detail, account_id, region, event_time)
+    # Security Hub batches can contain multiple independent findings.
+    if source == "aws.securityhub" and len(detail.get("findings", [])) > 1:
+        results = [handler({**event, "detail": {**detail, "findings": [finding]}}, context)
+                   for finding in detail["findings"]]
+        return {"statusCode": 201, "processed": True, "signalIds": [r["signalId"] for r in results]}
+    if source == "aws.cloudwatch" and detail_type == "CloudWatch Alarm State Change":
+        signal = normalize_cloudwatch_alarm(event)
+    elif source == "aws.securityhub":
+        signal = normalize_security_hub_finding(event)
+    else:
+        signal = _normalize_event(source, detail_type, detail, account_id, region, event_time)
+    signal.context.tags["cross_account"] = str(account_id != os.environ.get("AWS_ACCOUNT_ID", "")).lower()
+    if event.get("resources"):
+        signal.context.resource_arns = list(set(signal.context.resource_arns + event["resources"]))
 
     if not signal:
         logger.info("event_skipped", source=source, detail_type=detail_type)
@@ -73,7 +89,11 @@ def handler(event, context):
     stream_name = os.environ.get("SIGNAL_STREAM_NAME", Config.SIGNAL_STREAM_NAME)
     signal_table_name = os.environ.get("SIGNAL_TABLE_NAME", Config.SIGNAL_TABLE_NAME)
 
-    signal_dict = signal.to_dynamo()
+    signal_dict = signal.to_event()
+
+    if signal_table_name:
+        table = dynamodb.Table(signal_table_name)
+        table.put_item(Item=signal.to_dynamo())
 
     if stream_name:
         kinesis.put_record(
@@ -81,10 +101,6 @@ def handler(event, context):
             Data=json.dumps(signal_dict),
             PartitionKey=account_id or signal.signal_id,
         )
-
-    if signal_table_name:
-        table = dynamodb.Table(signal_table_name)
-        table.put_item(Item=signal_dict)
 
     logger.info(
         "cross_account_signal_published",

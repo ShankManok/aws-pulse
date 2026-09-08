@@ -1,5 +1,6 @@
 """ServiceNow Webhook Adapter - normalizes ServiceNow incident webhooks to SignalEvent."""
 import base64
+import hmac
 import json
 import os
 import boto3
@@ -58,7 +59,11 @@ def handler(event, context):
     stream_name = os.environ.get("SIGNAL_STREAM_NAME", "")
     table_name = os.environ.get("SIGNAL_TABLE_NAME", "")
 
-    signal_dict = signal.to_dynamo()
+    signal_dict = signal.to_event()
+
+    if table_name:
+        table = dynamodb.Table(table_name)
+        table.put_item(Item=signal.to_dynamo())
 
     if stream_name:
         kinesis.put_record(
@@ -66,10 +71,6 @@ def handler(event, context):
             Data=json.dumps(signal_dict),
             PartitionKey=signal.context.account_id or signal.signal_id,
         )
-
-    if table_name:
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=signal_dict)
 
     logger.info("servicenow_signal_ingested", signal_id=signal.signal_id, number=payload.get("number"))
 
@@ -84,9 +85,9 @@ def _validate_basic_auth(auth_header: str) -> bool:
     expected_user = os.environ.get("SERVICENOW_WEBHOOK_USER", "")
     expected_pass = os.environ.get("SERVICENOW_WEBHOOK_PASS", "")
 
-    if not expected_user:
+    if not expected_user or not expected_pass:
         logger.warning("servicenow_no_auth_configured")
-        return True  # Skip validation in dev
+        return False
 
     if not auth_header or not auth_header.startswith("Basic "):
         return False
@@ -95,7 +96,7 @@ def _validate_basic_auth(auth_header: str) -> bool:
         encoded = auth_header.replace("Basic ", "")
         decoded = base64.b64decode(encoded).decode("utf-8")
         username, password = decoded.split(":", 1)
-        return username == expected_user and password == expected_pass
+        return hmac.compare_digest(username, expected_user) and hmac.compare_digest(password, expected_pass)
     except (ValueError, UnicodeDecodeError):
         return False
 
