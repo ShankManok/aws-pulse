@@ -22,6 +22,8 @@ Subscriptions require a nonempty filter; malformed model output produces an erro
 
 ## Publish retries
 
+The SDK does not automatically retry non-idempotent persona creation or subscription POSTs after an ambiguous failure. It retries reads/updates and idempotent publishes.
+
 The SDK generates an idempotency key per logical publish call and retains it across HTTP retries. Pass `idempotency_key` explicitly to reuse it across process restarts. A key binds to the complete canonical payload for that deployment; changing the payload requires a new key. Receipts have a 30-day TTL, with deletion subject to DynamoDB TTL processing.
 
 A successful publish acknowledges durable database acceptance, not stream processing or notification delivery. Monitor the outbox failure queue and downstream workflow failures. Replaying an outbox record retains the signal ID; workflow execution naming prevents a second normal execution for that ID within Step Functions' name-retention period.

@@ -82,3 +82,17 @@ def test_sdk_throttle_retry_and_non_json_error():
     with pytest.raises(PulseError) as caught:
         client._handle_response(bad)
     assert caught.value.response_body == {'raw':'response'}
+
+
+def test_sdk_does_not_repeat_non_idempotent_post_after_ambiguous_failure():
+    client = PulseClient('https://test', max_retries=3)
+    for result in [response(503), requests.Timeout('response lost')]:
+        with patch.object(client._session, 'request') as send, patch('pulse.client.time.sleep') as sleep:
+            if isinstance(result, Exception):
+                send.side_effect = result
+            else:
+                send.return_value = result
+            with pytest.raises(PulseError):
+                client.create_persona('P', 'sre', [{'principalId':'a','channels':['email']}])
+            send.assert_called_once()
+            sleep.assert_not_called()

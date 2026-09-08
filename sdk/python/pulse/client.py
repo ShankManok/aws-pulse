@@ -324,7 +324,8 @@ class PulseClient:
         if params:
             url += "?" + urlencode(params)
 
-        for attempt in range(self._max_retries + 1):
+        retries = self._max_retries if method in ("GET", "PUT") or idempotency_key else 0
+        for attempt in range(retries + 1):
             try:
                 signed_headers = self._auth.sign_request(method, url, headers, body_str)
                 response = self._session.request(
@@ -337,7 +338,7 @@ class PulseClient:
 
                 if response.status_code == 429:
                     # Retry on throttling with exponential backoff
-                    if attempt < self._max_retries:
+                    if attempt < retries:
                         wait = 2 ** attempt
                         time.sleep(wait)
                         continue
@@ -349,7 +350,7 @@ class PulseClient:
 
                 if response.status_code >= 500:
                     # Retry on server errors
-                    if attempt < self._max_retries:
+                    if attempt < retries:
                         wait = 2 ** attempt
                         time.sleep(wait)
                         continue
@@ -357,11 +358,11 @@ class PulseClient:
                 return self._handle_response(response)
 
             except (requests.ConnectionError, requests.Timeout) as e:
-                if attempt < self._max_retries:
+                if attempt < retries:
                     wait = 2 ** attempt
                     time.sleep(wait)
                     continue
-                raise PulseError(f"Connection failed after {self._max_retries} retries: {e}")
+                raise PulseError(f"Connection failed after {retries} retries: {e}")
 
 
     def _handle_response(self, response: requests.Response) -> dict:
