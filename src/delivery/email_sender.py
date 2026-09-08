@@ -1,10 +1,12 @@
 """Email delivery via SES with persona-specific HTML templates."""
-import json
+from html import escape
 import os
-from datetime import datetime
+import hashlib
 import boto3
 import structlog
 from shared.config import Config
+from shared.action_tokens import action_url
+from shared.delivery_state import reserve, complete
 
 logger = structlog.get_logger()
 ses = boto3.client("ses")
@@ -49,7 +51,7 @@ def handler(event, context):
 
     if not recipients:
         logger.warning("no_recipients", persona_id=persona_id)
-        return {"statusCode": 200, "delivered": False, "error": "No recipients"}
+        return {"statusCode": 200, "delivered": False, "delivery_ids": [], "error": "No recipients"}
 
     signal_id = signal.get("signal_id", "unknown")
     severity = signal.get("severity", {})
@@ -67,9 +69,13 @@ def handler(event, context):
     delivery_ids = []
     failed = []
 
-    for idx, recipient in enumerate(recipients):
-        delivery_id = f"del-{signal_id}-{persona_id}-{idx}"
+    for recipient in dict.fromkeys(recipients):
+        delivery_id = "del-" + hashlib.sha256(f"{signal_id}:{persona_id}:email:{recipient}:{signal.get('_escalation', False)}".encode()).hexdigest()
 
+        token = reserve(table, delivery_id, signal, {**delivery, 'channel': 'email'}, recipient)
+        if token is None:
+            delivery_ids.append(delivery_id)
+            continue
         html_body = _build_html(
             severity_level=severity_level,
             color=color,
@@ -79,6 +85,7 @@ def handler(event, context):
             account_id=account_id,
             region=region,
             delivery_id=delivery_id,
+            action_token=token,
         )
 
         try:
@@ -91,18 +98,7 @@ def handler(event, context):
                 },
             )
 
-            # Record delivery for audit trail
-            now = datetime.utcnow().isoformat() + "Z"
-            table.put_item(Item={
-                "deliveryId": delivery_id,
-                "signalId": signal_id,
-                "personaId": persona_id,
-                "recipientId": recipient,
-                "channel": "email",
-                "contentVersion": str(hash(content))[:12],
-                "deliveredAt": now,
-                "escalated": False,
-            })
+            complete(table, delivery_id)
 
             delivery_ids.append(delivery_id)
             logger.info("email_sent", recipient=recipient, signal_id=signal_id, persona_id=persona_id)
@@ -110,6 +106,9 @@ def handler(event, context):
         except Exception as e:
             logger.error("email_failed", error=str(e), recipient=recipient, signal_id=signal_id)
             failed.append({"recipient": recipient, "error": str(e)})
+
+    if failed:
+        raise RuntimeError(f"Delivery failed for {len(failed)} recipient(s)")
 
     return {
         "statusCode": 200,
@@ -128,15 +127,20 @@ def _build_html(
     account_id: str,
     region: str,
     delivery_id: str,
+    action_token: str = "",
 ) -> str:
     """Build the notification email HTML with action buttons."""
     # Action callback base URL (set via env or default)
-    callback_base = os.environ.get("CALLBACK_API_URL", "")
+    callback_base = os.environ.get("CALLBACK_API_URL", "").rstrip("/")
 
-    ack_url = f"{callback_base}/v1/actions/{delivery_id}/acknowledge"
-    escalate_url = f"{callback_base}/v1/actions/{delivery_id}/escalate"
-    suppress_url = f"{callback_base}/v1/actions/{delivery_id}/suppress"
+    ack_url = action_url(callback_base, delivery_id, "acknowledge", action_token)
+    escalate_url = action_url(callback_base, delivery_id, "escalate", action_token)
+    suppress_url = action_url(callback_base, delivery_id, "suppress", action_token)
 
+    severity_level, source, title, content, account_id, region, delivery_id = (
+        escape(str(value)) for value in (severity_level, source, title, content, account_id, region, delivery_id)
+    )
+    ack_url, escalate_url, suppress_url = (escape(url, quote=True) for url in (ack_url, escalate_url, suppress_url))
     return f"""<!DOCTYPE html>
 <html><body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; max-width: 600px; margin: 0 auto; background: #F9FAFB; padding: 20px;">
   <div style="background: {color}; color: white; padding: 14px 20px; border-radius: 8px 8px 0 0; font-size: 14px;">

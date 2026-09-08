@@ -103,7 +103,7 @@ export class IntelligenceStack extends cdk.Stack {
 
     props.signalStream.grantRead(correlator);
     this.correlationTable.grantReadWriteData(correlator);
-    props.signalTable.grantReadData(correlator);
+    props.signalTable.grantReadWriteData(correlator);
 
     correlator.addToRolePolicy(new iam.PolicyStatement({
       actions: ['states:StartExecution'],
@@ -114,7 +114,7 @@ export class IntelligenceStack extends cdk.Stack {
     correlator.addEventSource(new eventsources.KinesisEventSource(props.signalStream, {
       startingPosition: lambda.StartingPosition.TRIM_HORIZON,
       batchSize: 25,
-      maxBatchingWindow: cdk.Duration.seconds(5),
+      maxBatchingWindow: cdk.Duration.seconds(0),
       retryAttempts: 3,
       bisectBatchOnError: true,
       reportBatchItemFailures: true,
@@ -139,7 +139,6 @@ export class IntelligenceStack extends cdk.Stack {
     });
 
     this.predictorsTable.grantReadData(predictor);
-    props.signalStream.grantWrite(predictor);
     props.signalTable.grantWriteData(predictor);
 
     // CloudWatch read permissions for metric queries

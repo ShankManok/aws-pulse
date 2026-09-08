@@ -10,6 +10,8 @@ import boto3
 import structlog
 import ulid
 from shared.config import Config
+from shared.runtime import authorize, body as decode_body, owns
+from shared.personas import SubscriptionFilter
 from shared.bedrock_client import invoke_model
 
 logger = structlog.get_logger()
@@ -27,16 +29,24 @@ def handler(event, context):
         { subscriptionId, naturalLanguage, filter }
     """
     try:
+        authorize(event)
         path_params = event.get("pathParameters", {}) or {}
         persona_id = path_params.get("personaId")
-        body = json.loads(event.get("body", "{}"))
+        body = decode_body(event)
         nl_text = body.get("naturalLanguage", "")
 
         if not persona_id:
             return _response(400, {"error": "Missing personaId in path"})
 
-        if not nl_text:
+        if not isinstance(nl_text, str) or not 1 <= len(nl_text.strip()) <= 2000:
             return _response(400, {"error": "Missing naturalLanguage in request body"})
+
+        persona_table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
+        persona = persona_table.get_item(Key={"personaId": persona_id}, ConsistentRead=True).get('Item')
+        if not persona or not owns(persona):
+            return _response(404, {'error': 'Persona not found'})
+        if len(persona.get('subscriptions', [])) >= 100:
+            return _response(409, {'error': 'Subscription limit reached'})
 
         # Use Bedrock to parse NL into structured filter
         structured_filter = _parse_nl_to_filter(nl_text)
@@ -56,8 +66,10 @@ def handler(event, context):
 
         persona_table.update_item(
             Key={"personaId": persona_id},
+            ConditionExpression="attribute_exists(personaId) AND (attribute_not_exists(subscriptions) OR size(subscriptions) < :limit)",
             UpdateExpression="SET subscriptions = list_append(if_not_exists(subscriptions, :empty), :sub)",
             ExpressionAttributeValues={
+                ":limit": 100,
                 ":sub": [subscription],
                 ":empty": [],
             },
@@ -76,7 +88,9 @@ def handler(event, context):
             "filter": structured_filter,
         })
 
-    except json.JSONDecodeError:
+    except PermissionError:
+        return _response(403, {'error': 'Caller is not authorized for this organization'})
+    except (ValueError, TypeError):
         return _response(400, {"error": "Invalid JSON body"})
     except Exception as e:
         logger.error("subscription_creation_failed", error=str(e))
@@ -122,38 +136,13 @@ Respond with ONLY valid JSON. No explanation or markdown. Example:
         # Validate and clean the filter
         return _validate_filter(parsed)
 
-    except (json.JSONDecodeError, Exception) as e:
-        logger.warning("nl_parse_failed", error=str(e), nl_text=nl_text)
-        # Fallback: create a keyword-based filter
-        return {"keywords": nl_text.lower().split()[:5]}
+    except (ValueError, IndexError) as exc:
+        raise ValueError('Could not produce a valid subscription; please rephrase') from exc
 
 
 def _validate_filter(raw_filter: dict) -> dict:
-    """Validate and clean a parsed filter, removing invalid fields."""
-    valid = {}
-
-    if "sources" in raw_filter and isinstance(raw_filter["sources"], list):
-        valid["sources"] = [s for s in raw_filter["sources"] if isinstance(s, str)]
-
-    if "severity_min" in raw_filter:
-        valid_levels = ("critical", "high", "medium", "low", "informational")
-        if raw_filter["severity_min"] in valid_levels:
-            valid["severity_min"] = raw_filter["severity_min"]
-
-    if "regions" in raw_filter and isinstance(raw_filter["regions"], list):
-        valid["regions"] = [r for r in raw_filter["regions"] if isinstance(r, str)]
-
-    if "tags" in raw_filter and isinstance(raw_filter["tags"], dict):
-        valid["tags"] = {k: v for k, v in raw_filter["tags"].items() if isinstance(k, str) and isinstance(v, str)}
-
-    if "signal_types" in raw_filter and isinstance(raw_filter["signal_types"], list):
-        valid_types = ("incident", "finding", "recommendation", "prediction", "lifecycle")
-        valid["signal_types"] = [t for t in raw_filter["signal_types"] if t in valid_types]
-
-    if "keywords" in raw_filter and isinstance(raw_filter["keywords"], list):
-        valid["keywords"] = [k for k in raw_filter["keywords"] if isinstance(k, str)][:10]
-
-    return valid
+    """Reject invalid constraints instead of silently broadening a subscription."""
+    return SubscriptionFilter.model_validate(raw_filter).model_dump(exclude_none=True)
 
 
 def _response(status_code: int, body: dict) -> dict:

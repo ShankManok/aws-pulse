@@ -1,10 +1,12 @@
 """Slack delivery via AWS Chatbot with interactive notification messages."""
 import json
 import os
-from datetime import datetime
+import hashlib
 import boto3
 import structlog
 from shared.config import Config
+from shared.action_tokens import action_url
+from shared.delivery_state import reserve, complete
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -60,7 +62,7 @@ def handler(event, context):
 
     if not recipients:
         logger.warning("no_slack_recipients", persona_id=persona_id)
-        return {"statusCode": 200, "delivered": False, "error": "No recipients"}
+        return {"statusCode": 200, "delivered": False, "delivery_ids": [], "error": "No recipients"}
 
     signal_id = signal.get("signal_id", "unknown")
     severity = signal.get("severity", {})
@@ -70,17 +72,24 @@ def handler(event, context):
     account_id = signal.get("context", {}).get("account_id", "")
     region = signal.get("context", {}).get("region", "")
 
-    sns_topic_arn = os.environ.get("CHATBOT_SNS_TOPIC_ARN", "")
+    destinations = json.loads(os.environ.get("SLACK_DESTINATIONS", "{}"))
     delivery_table_name = os.environ.get("DELIVERY_TABLE_NAME", Config.DELIVERY_TABLE_NAME)
-    callback_base = os.environ.get("CALLBACK_API_URL", "")
+    callback_base = os.environ.get("CALLBACK_API_URL", "").rstrip("/")
     table = dynamodb.Table(delivery_table_name)
 
     delivery_ids = []
     failed = []
 
-    for idx, recipient in enumerate(recipients):
-        delivery_id = f"del-{signal_id}-{persona_id}-slack-{idx}"
+    for recipient in dict.fromkeys(recipients):
+        sns_topic_arn = destinations.get(recipient)
+        if not sns_topic_arn:
+            raise ValueError(f"No Slack destination configured for {recipient}")
+        delivery_id = "del-" + hashlib.sha256(f"{signal_id}:{persona_id}:slack:{recipient}:{signal.get('_escalation', False)}".encode()).hexdigest()
 
+        token = reserve(table, delivery_id, signal, {**delivery, 'channel': 'slack'}, recipient)
+        if token is None:
+            delivery_ids.append(delivery_id)
+            continue
         # Build Slack-formatted message via SNS
         slack_message = _build_slack_message(
             severity_level=severity_level,
@@ -90,6 +99,7 @@ def handler(event, context):
             account_id=account_id,
             region=region,
             delivery_id=delivery_id,
+            action_token=token,
             callback_base=callback_base,
         )
 
@@ -111,18 +121,7 @@ def handler(event, context):
                 },
             )
 
-            # Record delivery for audit trail
-            now = datetime.utcnow().isoformat() + "Z"
-            table.put_item(Item={
-                "deliveryId": delivery_id,
-                "signalId": signal_id,
-                "personaId": persona_id,
-                "recipientId": recipient,
-                "channel": "slack",
-                "contentVersion": str(hash(content))[:12],
-                "deliveredAt": now,
-                "escalated": False,
-            })
+            complete(table, delivery_id)
 
             delivery_ids.append(delivery_id)
             logger.info("slack_sent", recipient=recipient, signal_id=signal_id, persona_id=persona_id)
@@ -130,6 +129,9 @@ def handler(event, context):
         except Exception as e:
             logger.error("slack_failed", error=str(e), recipient=recipient, signal_id=signal_id)
             failed.append({"recipient": recipient, "error": str(e)})
+
+    if failed:
+        raise RuntimeError(f"Delivery failed for {len(failed)} recipient(s)")
 
     return {
         "statusCode": 200,
@@ -148,14 +150,14 @@ def _build_slack_message(
     region: str,
     delivery_id: str,
     callback_base: str,
+    action_token: str = "",
 ) -> dict:
     """Build a Slack Block Kit message payload for AWS Chatbot."""
     emoji = SEVERITY_EMOJI.get(severity_level, ":bell:")
-    color = SEVERITY_COLORS.get(severity_level, "#6B7280")
 
-    ack_url = f"{callback_base}/v1/actions/{delivery_id}/acknowledge"
-    escalate_url = f"{callback_base}/v1/actions/{delivery_id}/escalate"
-    suppress_url = f"{callback_base}/v1/actions/{delivery_id}/suppress"
+    ack_url = action_url(callback_base, delivery_id, "acknowledge", action_token)
+    escalate_url = action_url(callback_base, delivery_id, "escalate", action_token)
+    suppress_url = action_url(callback_base, delivery_id, "suppress", action_token)
 
     return {
         "version": "1.0",

@@ -1,5 +1,7 @@
 # API Reference
 
+See [review and SDK/API availability](review.md#sdkapi-availability) before using SDK methods. All SDK routes now share the main API. Publish curl examples below also need SigV4 signing, e.g. curl `--aws-sigv4` with temporary AWS credentials.
+
 ## Base URLs
 
 | API | URL Pattern |
@@ -12,9 +14,11 @@ Get URLs from CDK outputs after deployment.
 
 ## Authentication
 
-- **Publish API**: Requires `x-api-key` header (API Gateway API Key)
+- **Publish API**: Requires IAM SigV4 authorization **and** `x-api-key` (usage plan)
 - **Webhook endpoints**: Provider-specific auth (see docs/webhooks.md)
-- **SDK clients**: SigV4 signing via AWS credentials
+- **Subscription API**: IAM SigV4 authorization
+- **SDK clients**: SigV4 plus `api_key` on all main API routes
+- **Action callbacks**: Delivery-scoped token, 24-hour expiry, one confirmed response
 
 ---
 
@@ -141,7 +145,7 @@ Record an action on a delivered notification (from email buttons or API).
 }
 ```
 
-**GET** version returns HTML confirmation page (for email link clicks).
+**GET** requires the token and displays a confirmation form without mutation. **POST** verifies the token and conditionally records one response. Unsigned legacy links are rejected. Suppress creates a source/type/severity-scoped 24-hour rule for nonurgent signals; escalate invokes the next configured escalation target.
 
 ---
 
@@ -163,6 +167,7 @@ from pulse import PulseClient
 client = PulseClient(
     endpoint_url="https://<api-id>.execute-api.ap-southeast-1.amazonaws.com/dev",
     region="ap-southeast-1",
+    api_key="<api-key-value>",
 )
 
 response = client.publish_signal(

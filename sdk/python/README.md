@@ -1,5 +1,6 @@
 # AWS Pulse Python SDK
 
+> Current implementation limits and authentication changes: see the [code and feature review](../../docs/review.md). Earlier examples and target-state claims must be read with that review.
 Python client for the AWS Pulse intelligent notification API. Authenticates with SigV4 signing using your AWS credentials.
 
 ## Installation

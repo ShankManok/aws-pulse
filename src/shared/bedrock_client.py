@@ -1,5 +1,6 @@
 """Bedrock invocation wrapper for Pulse."""
 import json
+import os
 import boto3
 import structlog
 
@@ -17,29 +18,19 @@ def get_client():
 
 def invoke_model(
     prompt: str,
-    model_id: str = "anthropic.claude-sonnet-4-20250514",
+    model_id: str | None = None,
     max_tokens: int = 1024,
     temperature: float = 0.3,
 ) -> str:
     """Invoke a Bedrock model and return the text response."""
     client = get_client()
 
-    body = json.dumps({
-        "anthropic_version": "bedrock-2023-05-31",
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": temperature,
-    })
-
-    response = client.invoke_model(
-        modelId=model_id,
-        body=body,
-        contentType="application/json",
-        accept="application/json",
+    response = client.converse(
+        modelId=model_id or os.environ.get("BEDROCK_MODEL_ID", "anthropic.claude-sonnet-4-20250514-v1:0"),
+        messages=[{"role": "user", "content": [{"text": prompt}]}],
+        inferenceConfig={"maxTokens": max_tokens, "temperature": temperature},
     )
-
-    result = json.loads(response["body"].read())
-    return result["content"][0]["text"]
+    return "".join(block.get("text", "") for block in response["output"]["message"]["content"])
 
 
 def score_severity(signal_data: dict) -> dict:

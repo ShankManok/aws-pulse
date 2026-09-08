@@ -22,6 +22,16 @@ def env_vars():
         yield
 
 
+@pytest.fixture(autouse=True)
+def mock_persist():
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for provider in ('pagerduty', 'datadog', 'servicenow'):
+            stack.enter_context(patch(f'src.ingestion.webhook_adapters.{provider}.persist',
+                side_effect=lambda signal, table, key: (table.put_item(Item=signal.to_dynamo()), signal.signal_id)[1]))
+        yield
+
+
 @pytest.fixture
 def mock_kinesis():
     with patch("src.ingestion.webhook_adapters.pagerduty.kinesis") as mock_pd, \
@@ -70,7 +80,7 @@ class TestPagerDutyAdapter:
         assert result["statusCode"] == 201
         resp = json.loads(result["body"])
         assert "signalId" in resp
-        mock_kinesis["pagerduty"].put_record.assert_called_once()
+        mock_kinesis["pagerduty"].put_record.assert_not_called()
 
     def test_invalid_signature_rejected(self, mock_kinesis, mock_dynamodb):
         """Invalid signature should return 401."""
@@ -111,7 +121,7 @@ class TestDatadogAdapter:
         result = handler(event, None)
 
         assert result["statusCode"] == 201
-        mock_kinesis["datadog"].put_record.assert_called_once()
+        mock_kinesis["datadog"].put_record.assert_not_called()
 
     def test_invalid_api_key_rejected(self, mock_kinesis, mock_dynamodb):
         """Invalid API key should return 401."""
@@ -168,7 +178,7 @@ class TestServiceNowAdapter:
         result = handler(event, None)
 
         assert result["statusCode"] == 201
-        mock_kinesis["servicenow"].put_record.assert_called_once()
+        mock_kinesis["servicenow"].put_record.assert_not_called()
 
     def test_invalid_basic_auth_rejected(self, mock_kinesis, mock_dynamodb):
         """Invalid Basic Auth should return 401."""

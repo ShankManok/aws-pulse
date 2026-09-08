@@ -15,11 +15,11 @@ setup(
     description="Python SDK for AWS Pulse - intelligent notification infrastructure",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/aws-pulse/aws-pulse",
+    url="https://github.com/ShankManok/aws-pulse",
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: Apache Software License",
         "Programming Language :: Python :: 3",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",

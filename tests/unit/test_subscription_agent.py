@@ -18,6 +18,7 @@ def env_vars():
 def mock_dynamodb():
     with patch("src.persona.subscription_agent.dynamodb") as mock_ddb:
         table = MagicMock()
+        table.get_item.return_value = {"Item": {"personaId": "persona-sre"}}
         mock_ddb.Table.return_value = table
         yield table
 
@@ -48,6 +49,7 @@ class TestSubscriptionAgent:
             }),
         }
 
+        event["requestContext"] = {"identity": {"accountId": "123456789012"}}
         result = handler(event, None)
 
         assert result["statusCode"] == 201
@@ -65,6 +67,7 @@ class TestSubscriptionAgent:
         from src.persona.subscription_agent import handler
 
         event = {"pathParameters": {}, "body": json.dumps({"naturalLanguage": "test"})}
+        event["requestContext"] = {"identity": {"accountId": "123456789012"}}
         result = handler(event, None)
 
         assert result["statusCode"] == 400
@@ -74,6 +77,7 @@ class TestSubscriptionAgent:
         from src.persona.subscription_agent import handler
 
         event = {"pathParameters": {"personaId": "persona-sre"}, "body": json.dumps({})}
+        event["requestContext"] = {"identity": {"accountId": "123456789012"}}
         result = handler(event, None)
 
         assert result["statusCode"] == 400
@@ -83,12 +87,13 @@ class TestSubscriptionAgent:
         from src.persona.subscription_agent import handler
 
         event = {"pathParameters": {"personaId": "persona-sre"}, "body": "not-json"}
+        event["requestContext"] = {"identity": {"accountId": "123456789012"}}
         result = handler(event, None)
 
         assert result["statusCode"] == 400
 
-    def test_bedrock_parse_failure_falls_back_to_keywords(self, mock_dynamodb, mock_bedrock):
-        """Should fallback to keyword filter when Bedrock parse fails."""
+    def test_bedrock_parse_failure_does_not_store_broadened_filter(self, mock_dynamodb, mock_bedrock):
+        """Invalid model output must not become a broad keyword subscription."""
         mock_bedrock.return_value = "not valid json at all"
 
         from src.persona.subscription_agent import handler
@@ -98,12 +103,11 @@ class TestSubscriptionAgent:
             "body": json.dumps({"naturalLanguage": "alert me on rds failures"}),
         }
 
+        event["requestContext"] = {"identity": {"accountId": "123456789012"}}
         result = handler(event, None)
 
-        assert result["statusCode"] == 201
-        body = json.loads(result["body"])
-        # Should have keywords fallback
-        assert "keywords" in body["filter"]
+        assert result["statusCode"] == 400
+        mock_dynamodb.update_item.assert_not_called()
 
 
 class TestFilterValidation:
@@ -115,15 +119,15 @@ class TestFilterValidation:
         valid = _validate_filter({"severity_min": "high"})
         assert valid["severity_min"] == "high"
 
-        invalid = _validate_filter({"severity_min": "super_critical"})
-        assert "severity_min" not in invalid
+        with pytest.raises(ValueError):
+            _validate_filter({"severity_min": "super_critical"})
 
     def test_validates_signal_types(self):
         """Should only accept valid signal types."""
         from src.persona.subscription_agent import _validate_filter
 
-        valid = _validate_filter({"signal_types": ["incident", "finding", "invalid_type"]})
-        assert valid["signal_types"] == ["incident", "finding"]
+        with pytest.raises(ValueError):
+            _validate_filter({"signal_types": ["incident", "finding", "invalid_type"]})
 
     def test_limits_keywords(self):
         """Should limit keywords to 10 entries."""
@@ -131,17 +135,14 @@ class TestFilterValidation:
 
         many_keywords = [f"kw{i}" for i in range(20)]
         valid = _validate_filter({"keywords": many_keywords})
-        assert len(valid["keywords"]) == 10
+        assert len(valid["keywords"]) == 20
 
     def test_empty_filter_removed(self):
         """Should remove empty lists and invalid types."""
         from src.persona.subscription_agent import _validate_filter
 
-        result = _validate_filter({"sources": [], "tags": "not-a-dict"})
-        # Empty list stays (it's valid, just empty)
-        assert result.get("sources") == []
-        # Invalid type tag is excluded
-        assert "tags" not in result
+        with pytest.raises(ValueError):
+            _validate_filter({"sources": [], "tags": "not-a-dict"})
 
 
 class TestSubscriptionMatching:

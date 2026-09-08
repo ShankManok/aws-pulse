@@ -6,11 +6,14 @@ import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as athena from 'aws-cdk-lib/aws-athena';
+import * as eventsources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
 import { Construct } from 'constructs';
 
 export interface AnalyticsStackProps extends cdk.StackProps {
   stage: string;
   deliveryTableName: string;
+  deliveryTableStreamArn: string;
 }
 
 export class AnalyticsStack extends cdk.Stack {
@@ -39,8 +42,10 @@ export class AnalyticsStack extends cdk.Stack {
     this.auditBucket = new s3.Bucket(this, 'AuditBucket', {
       bucketName: `pulse-audit-${cdk.Aws.ACCOUNT_ID}-${props.stage}`,
       encryption: s3.BucketEncryption.S3_MANAGED,
+      versioned: true,
+      objectLockEnabled: true,
+      objectLockDefaultRetention: s3.ObjectLockRetention.compliance(cdk.Duration.days(365)),
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
-      versioned: false,
       lifecycleRules: [
         {
           id: 'transition-to-ia',
@@ -98,7 +103,16 @@ export class AnalyticsStack extends cdk.Stack {
     }));
 
     // Permissions: write to audit bucket
-    this.auditBucket.grantWrite(auditExporter);
+    this.auditBucket.grantPut(auditExporter);
+    const deliveries = dynamodb.Table.fromTableAttributes(this, 'DeliveryStream', {
+      tableName: props.deliveryTableName, tableStreamArn: props.deliveryTableStreamArn,
+    });
+    const auditDlq = new sqs.Queue(this, 'AuditFailures', { retentionPeriod: cdk.Duration.days(14) });
+    auditExporter.addEventSource(new eventsources.DynamoEventSource(deliveries, {
+      startingPosition: lambda.StartingPosition.TRIM_HORIZON, batchSize: 100,
+      reportBatchItemFailures: true, bisectBatchOnError: true, retryAttempts: 10,
+      onFailure: new eventsources.SqsDlq(auditDlq),
+    }));
 
     // Schedule: hourly at minute 5
     new events.Rule(this, 'AuditExportSchedule', {

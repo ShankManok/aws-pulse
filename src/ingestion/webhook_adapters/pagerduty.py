@@ -1,8 +1,11 @@
 """PagerDuty Webhook Adapter - normalizes PagerDuty incident webhooks to SignalEvent."""
-import hashlib
 import hmac
 import json
 import os
+from shared.ingest import persist
+from shared.webhooks import secret
+from shared.runtime import body as decode_body
+import hashlib
 import boto3
 import structlog
 from shared.models import SignalEvent, SignalContent, Severity, SeverityLevel, SignalContext, AudienceHint
@@ -29,8 +32,14 @@ def handler(event, context):
     Validates X-PagerDuty-Signature header and normalizes to SignalEvent.
     """
     # Validate signature
-    headers = event.get("headers", {})
+    headers = {key.lower(): value for key, value in (event.get("headers") or {}).items()}
     body = event.get("body", "")
+    if event.get("isBase64Encoded"):
+        import base64
+        try:
+            body = base64.b64decode(body, validate=True).decode("utf-8")
+        except (ValueError, UnicodeDecodeError):
+            return {"statusCode": 400, "body": json.dumps({"error": "Invalid encoded body"})}
     signature = headers.get("X-PagerDuty-Signature") or headers.get("x-pagerduty-signature", "")
 
     if not _validate_signature(body, signature):
@@ -38,66 +47,57 @@ def handler(event, context):
         return {"statusCode": 401, "body": json.dumps({"error": "Invalid signature"})}
 
     try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, TypeError):
+        payload = decode_body(event)
+    except (ValueError, TypeError, UnicodeDecodeError):
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON body"})}
 
     # PagerDuty v3 webhook format: event.data contains the incident
-    pd_event = payload.get("event", {})
-    event_type = pd_event.get("event_type", "")
-    incident = pd_event.get("data", {})
+    try:
+        pd_event = payload.get("event", {})
+        event_type = pd_event.get("event_type", "")
+        incident = pd_event.get("data", {})
 
-    if not incident:
-        return {"statusCode": 200, "body": json.dumps({"message": "No incident data, skipped"})}
+        if not incident:
+            return {"statusCode": 200, "body": json.dumps({"message": "No incident data, skipped"})}
 
-    # Normalize to SignalEvent
-    signal = _normalize_incident(incident, event_type)
+        # Normalize to SignalEvent
+        signal = _normalize_incident(incident, event_type)
+    except (ValueError, TypeError, AttributeError):
+        return {"statusCode": 400, "body": json.dumps({"error": "Invalid provider payload"})}
 
-    # Write to Kinesis + DynamoDB (same pattern as publish_handler)
-    stream_name = os.environ.get("SIGNAL_STREAM_NAME", "")
+    # Persist atomically; the DynamoDB outbox forwards to Kinesis
     table_name = os.environ.get("SIGNAL_TABLE_NAME", "")
 
-    signal_dict = signal.to_dynamo()
-
-    if stream_name:
-        kinesis.put_record(
-            StreamName=stream_name,
-            Data=json.dumps(signal_dict),
-            PartitionKey=signal.context.account_id or signal.signal_id,
-        )
-
-    if table_name:
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=signal_dict)
+    key = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    sid = persist(signal, dynamodb.Table(table_name), f"pagerduty:{key}" if key else None)
 
     logger.info("pagerduty_signal_ingested", signal_id=signal.signal_id, pd_event_type=event_type)
 
     return {
         "statusCode": 201,
-        "body": json.dumps({"signalId": signal.signal_id, "status": "new"}),
+        "body": json.dumps({"signalId": sid, "status": "new"}),
     }
 
 
 def _validate_signature(body: str, signature: str) -> bool:
     """Validate PagerDuty webhook signature using HMAC-SHA256."""
-    secret = os.environ.get("PAGERDUTY_WEBHOOK_SECRET", "")
-    if not secret:
-        # No secret configured - skip validation in dev
+    signing_secret = secret("PAGERDUTY_WEBHOOK_SECRET")
+    if not signing_secret:
+        # An unconfigured integration must reject incoming requests.
         logger.warning("pagerduty_no_secret_configured")
-        return True
+        return False
 
     if not signature:
         return False
 
     # PagerDuty uses v1=<hmac> format
     expected = hmac.new(
-        secret.encode("utf-8"),
+        signing_secret.encode("utf-8"),
         body.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
 
-    sig_value = signature.replace("v1=", "")
-    return hmac.compare_digest(expected, sig_value)
+    return any(hmac.compare_digest(expected, value.strip()[3:]) for value in signature.split(",") if value.strip().startswith("v1="))
 
 
 def _normalize_incident(incident: dict, event_type: str) -> SignalEvent:

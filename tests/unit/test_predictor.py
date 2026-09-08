@@ -83,7 +83,8 @@ class TestPredictor:
 
         assert result["statusCode"] == 200
         assert result["predictions_generated"] == 1
-        mock_kinesis.put_record.assert_called_once()
+        mock_kinesis.put_record.assert_not_called()
+        mock_dynamodb.put_item.assert_called_once()
 
     def test_no_prediction_when_trend_away_from_threshold(self, mock_dynamodb, mock_cloudwatch, mock_kinesis):
         """Should NOT generate signal when metric is trending away from threshold."""

@@ -1,168 +1,57 @@
-# Pulse
+# AWS Pulse
 
-> Intelligent notification infrastructure for AWS — ingests signals from all services, correlates across boundaries, transforms per-persona using AI, and delivers through the right channel at the right time.
+Intelligent AWS notification infrastructure: ingest signals, group related resources, transform content for personas, deliver notifications, and collect feedback.
 
-## Architecture
+**Status: development prototype with tested core components, not a complete production platform.** Read the [code and feature review](docs/review.md) for verified behavior, repaired defects, missing features and release gates. The engineering spec describes the target product, not completed functionality.
 
-```
-┌─────────────────────────────────────────────────────────────────────────┐
-│                         AWS Pulse                                │
-│                                                                         │
-│  ┌──────────┐   ┌──────────────┐   ┌────────────┐   ┌──────────────┐  │
-│  │ Ingestion│──▶│ Intelligence │──▶│  Persona   │──▶│   Delivery   │  │
-│  │  Layer   │   │    Engine    │   │   Engine   │   │    Layer     │  │
-│  └──────────┘   └──────────────┘   └────────────┘   └──────────────┘  │
-│       ▲                                                     │          │
-│       │              ┌──────────────┐                       │          │
-│       └──────────────│   Learning   │◀──────────────────────┘          │
-│                      └──────────────┘                                  │
-└─────────────────────────────────────────────────────────────────────────┘
-```
+## Local development
 
-## Quick Start
+Requires Python 3.12 and Node.js 20 or later.
 
 ```bash
-# Prerequisites
-npm install -g aws-cdk
-pip install boto3
-
-# Clone and install
-git clone https://github.com/shankmanok/aws-pulse.git
-cd aws-pulse
-npm install
-
-# Deploy to dev
-cdk deploy --all --context stage=dev
-```
-
-## Project Structure
-
-```
-aws-pulse/
-├── .kiro/
-│   └── spec.md                    # Kiro engineering spec (this drives development)
-├── infra/                         # CDK infrastructure
-│   ├── bin/
-│   │   └── app.ts                 # CDK app entry point
-│   ├── lib/
-│   │   ├── ingestion-stack.ts     # API GW, Kinesis, EventBridge rules
-│   │   ├── intelligence-stack.ts  # Correlation, Severity, Enrichment
-│   │   ├── persona-stack.ts       # Personas, Content Transformer, Router
-│   │   ├── delivery-stack.ts      # SES, Chatbot, Escalation, Actions
-│   │   ├── learning-stack.ts      # Feedback, Suppression model
-│   │   └── analytics-stack.ts     # Audit trail, NRS, Reports
-│   ├── cdk.json
-│   ├── tsconfig.json
-│   └── package.json
-├── src/                           # Lambda handlers (Python)
-│   ├── ingestion/
-│   │   ├── publish_handler.py     # Publish API Lambda
-│   │   ├── normalizer.py          # Signal normalization
-│   │   └── webhook_adapters/
-│   │       ├── datadog.py
-│   │       ├── pagerduty.py
-│   │       └── servicenow.py
-│   ├── intelligence/
-│   │   ├── correlator.py          # Kinesis consumer - time-window grouping
-│   │   ├── severity_scorer.py     # Bedrock severity assessment
-│   │   ├── enricher.py            # Resource Explorer + RAG enrichment
-│   │   └── predictor.py           # Trend-based predictive signals
-│   ├── persona/
-│   │   ├── audience_router.py     # Match signals to personas
-│   │   ├── content_transformer.py # Bedrock per-persona content generation
-│   │   ├── subscription_agent.py  # NL subscription → EventBridge rules
-│   │   └── prompts/
-│   │       ├── ciso.txt
-│   │       ├── sre.txt
-│   │       ├── cto.txt
-│   │       ├── finops.txt
-│   │       └── compliance.txt
-│   ├── delivery/
-│   │   ├── email_sender.py        # SES HTML email delivery
-│   │   ├── slack_sender.py        # Chatbot Slack delivery
-│   │   ├── escalation_handler.py  # SLA timer + escalation logic
-│   │   ├── action_handler.py      # Embedded button callbacks
-│   │   └── templates/
-│   │       ├── digest.html
-│   │       ├── alert.html
-│   │       └── escalation.html
-│   ├── learning/
-│   │   ├── feedback_processor.py  # DDB Streams consumer
-│   │   ├── suppression_model.py   # Behavioral suppression logic
-│   │   └── nrs_calculator.py      # Notification Reduction Score
-│   └── shared/
-│       ├── models.py              # Pydantic data models
-│       ├── bedrock_client.py      # Bedrock invocation wrapper
-│       └── config.py              # Environment config
-├── sdk/                           # Pulse SDK
-│   └── python/
-│       ├── pulse/
-│       │   ├── __init__.py
-│       │   ├── client.py          # publish_signal(), create_persona()
-│       │   └── models.py          # SDK data models
-│       ├── setup.py
-│       └── README.md
-├── tests/
-│   ├── unit/
-│   │   ├── test_correlator.py
-│   │   ├── test_severity_scorer.py
-│   │   ├── test_content_transformer.py
-│   │   └── test_audience_router.py
-│   ├── integration/
-│   │   ├── test_publish_flow.py
-│   │   └── test_delivery_flow.py
-│   └── e2e/
-│       └── test_signal_to_delivery.py
-├── docs/
-│   ├── architecture.md
-│   ├── api-reference.md
-│   ├── personas.md
-│   └── deployment.md
-├── .github/
-│   └── workflows/
-│       ├── ci.yml                 # Lint + unit tests
-│       ├── deploy-dev.yml         # Deploy to dev on push to main
-│       └── deploy-prod.yml        # Deploy to prod on release tag
-├── .gitignore
-├── package.json
-├── requirements.txt
-├── Makefile
-└── README.md
-```
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Infrastructure | AWS CDK (TypeScript) |
-| Compute | AWS Lambda (Python 3.12) |
-| Event Bus | Amazon EventBridge |
-| Stream Processing | Amazon Kinesis Data Streams |
-| AI/ML | Amazon Bedrock (Claude 4 Sonnet, Nova Pro) |
-| Orchestration | AWS Step Functions |
-| Database | Amazon DynamoDB |
-| Delivery | Amazon SES, AWS Chatbot, User Notifications |
-| Escalation | EventBridge Scheduler |
-| Analytics | CloudWatch Metrics, Athena, S3 |
-| API | Amazon API Gateway (REST) |
-| Auth | IAM (SigV4) + API Keys (3P) |
-
-## Development
-
-```bash
-# Run unit tests
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
+npm ci
 make test
-
-# Deploy single stack
-cdk deploy IngestionStack --context stage=dev
-
-# Invoke locally
-sam local invoke PublishHandler -e events/sample_signal.json
-
-# Run E2E
-pytest tests/e2e/ --stage=dev
+make lint
+npm test
+python scripts/package_smoke.py infra/cdk.out
 ```
 
-## License
+`make test` runs unit and simulated integration tests with dummy AWS credentials and enforces 100% statement coverage for the application and SDK. `npm test` builds TypeScript, synthesizes the CDK templates, and checks infrastructure contracts. No live notifications are sent by these commands. Synthesis bundles Python dependencies and therefore needs package-index access.
 
-Apache-2.0
+## Current components
+
+| Directory | Contents |
+|---|---|
+| `infra/` | Six core CDK stacks plus optional per-account organization forwarding |
+| `src/ingestion/` | Publish handler, native-event normalization, three webhook adapters |
+| `src/api/` | IAM-bound persona, signal, delivery, feedback and analytics APIs |
+| `src/intelligence/` | Resource grouping and metric-trend predictor |
+| `src/persona/` | Audience routing, Bedrock transformation and NL subscription parser |
+| `src/delivery/` | SES/SNS senders, tokenized feedback and escalation handlers |
+| `src/learning/` | Feedback heuristic, suppression, daily metrics and retained delivery-change audit export |
+| `src/shared/` | Canonical models, DynamoDB serialization, Bedrock client and action tokens |
+| `sdk/python/` | Python client with implemented publish, persona, subscription, read, feedback and analytics routes |
+| `tests/` | Unit tests, simulated integration regressions and unexecuted live load scripts |
+
+All main SDK/API routes require IAM SigV4 authorization and an API usage key. Webhooks reject requests until credentials are configured. Email links show a confirmation page before recording feedback.
+
+The tested core now has transactional ingestion, replay-aware delivery, full escalation chains, strict subscription validation and retained audit history. Remaining target features include semantic deduplication, enrichment, shared SaaS tenancy, cadence/quiet hours, additional channels and dashboards. See the [feature matrix](docs/review.md#feature-verification-matrix) and [configuration/recovery guide](docs/operations.md).
+
+## Deployment
+
+Resolve the review's release gates and configure a sandbox account first. The GitHub dev deployment workflow is manually dispatched and validates the code before deployment. A passing local suite does not verify SES identities, model access or Slack routing.
+
+```bash
+npm run synth
+# After account configuration and readiness review:
+make deploy-dev
+```
+
+For cross-account ingestion, supply `--context organizationId=o-...` to the central ingestion stack. Without it, no cross-account bus access is granted. Forwarding must be installed in each participating account; the optional OrgSetup stack does not automatically roll out to an organization.
+
+[API reference](docs/api-reference.md) · [Deployment notes](docs/deployment.md) · [Engineering target](.kiro/spec.md)
+
+Apache-2.0.

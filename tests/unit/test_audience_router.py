@@ -19,6 +19,7 @@ def mock_dynamodb():
     """Mock DynamoDB resource and table."""
     with patch("src.persona.audience_router.dynamodb") as mock_ddb:
         table = MagicMock()
+        table.scan.return_value = {"Items": []}
         mock_ddb.Table.return_value = table
         # By default, all persona lookups succeed
         table.get_item.return_value = {"Item": {"personaId": "exists"}}

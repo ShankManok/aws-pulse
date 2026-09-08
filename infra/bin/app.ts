@@ -14,10 +14,10 @@ const stage = app.node.tryGetContext('stage') || 'dev';
 const env = { account: process.env.CDK_DEFAULT_ACCOUNT, region: process.env.CDK_DEFAULT_REGION || 'ap-southeast-1' };
 
 // --- Layer 1: Ingestion (no dependencies) ---
-const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, stage });
+const ingestion = new IngestionStack(app, `Pulse-Ingestion-${stage}`, { env, stage, organizationId: app.node.tryGetContext('organizationId') });
 
 // --- Layer 2: Delivery (no dependencies on other Pulse stacks) ---
-const delivery = new DeliveryStack(app, `Pulse-Delivery-${stage}`, { env, stage });
+const delivery = new DeliveryStack(app, `Pulse-Delivery-${stage}`, { env, stage, sesDomain: app.node.tryGetContext('sesDomain') });
 
 // --- Layer 3: Persona (depends on Delivery for table name + SES domain) ---
 const persona = new PersonaStack(app, `Pulse-Persona-${stage}`, {
@@ -45,6 +45,7 @@ const analytics = new AnalyticsStack(app, `Pulse-Analytics-${stage}`, {
   env,
   stage,
   deliveryTableName: delivery.deliveryTable.tableName,
+  deliveryTableStreamArn: delivery.deliveryTable.tableStreamArn!,
 });
 analytics.addDependency(delivery);
 

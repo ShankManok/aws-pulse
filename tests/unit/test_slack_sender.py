@@ -12,6 +12,7 @@ def env_vars():
         "DELIVERY_TABLE_NAME": "pulse-delivery-test",
         "CHATBOT_SNS_TOPIC_ARN": "arn:aws:sns:ap-southeast-1:123456789012:pulse-chatbot-dev",
         "CALLBACK_API_URL": "https://callback.example.com/dev",
+        "SLACK_DESTINATIONS": json.dumps({name: "arn:aws:sns:ap-southeast-1:123456789012:pulse-chatbot-dev" for name in ["sre-oncall-channel", "sre-channel", "ops-channel", "incidents-channel"]}),
         "STAGE": "dev",
     }):
         yield
@@ -67,7 +68,7 @@ class TestSlackSender:
         assert result["statusCode"] == 200
         assert result["delivered"] is True
         assert len(result["delivery_ids"]) == 1
-        assert "slack" in result["delivery_ids"][0]
+        assert result["delivery_ids"][0].startswith("del-")
 
         # Verify SNS publish was called
         mock_sns.publish.assert_called_once()
@@ -120,11 +121,8 @@ class TestSlackSender:
 
         from src.delivery.slack_sender import handler
 
-        result = handler(sample_event, None)
-
-        assert result["delivered"] is False
-        assert len(result["failed"]) == 1
-        assert "SNS throttled" in result["failed"][0]["error"]
+        with pytest.raises(RuntimeError, match="Delivery failed"):
+            handler(sample_event, None)
 
     def test_multiple_recipients(self, mock_dynamodb, mock_sns, sample_event):
         """Should send to multiple Slack channels."""

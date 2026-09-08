@@ -1,5 +1,8 @@
 # Deployment Guide
 
+> Current implementation limits and authentication changes: see the [code and feature review](review.md). Earlier examples and target-state claims must be read with that review.
+See [current configuration and recovery](operations.md) for Secrets Manager, SES, Slack destination mapping and audit retention.
+
 ## Prerequisites
 
 - AWS CLI v2 configured with credentials

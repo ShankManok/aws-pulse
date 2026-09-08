@@ -1,10 +1,10 @@
 """Schedule Escalation - creates EventBridge Scheduler one-time schedules for delivery SLA checks."""
+import hashlib
 import json
 import os
 from datetime import datetime, timedelta
 import boto3
 import structlog
-from shared.config import Config
 
 logger = structlog.get_logger()
 scheduler_client = boto3.client("scheduler")
@@ -68,7 +68,7 @@ def handler(event, context):
     scheduled_names = []
 
     for delivery_id in delivery_ids:
-        schedule_name = f"pulse-esc-{delivery_id}"
+        schedule_name = "pulse-esc-" + hashlib.sha256(delivery_id.encode()).hexdigest()[:48]
         # EventBridge Scheduler names: max 64 chars, [a-zA-Z0-9-_.]
         schedule_name = schedule_name[:64].replace("@", "-").replace(" ", "-")
 
@@ -113,6 +113,7 @@ def handler(event, context):
                 delivery_id=delivery_id,
                 error=str(e),
             )
+            raise
 
     return {
         "statusCode": 200,

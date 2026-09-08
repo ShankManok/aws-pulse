@@ -2,7 +2,6 @@
 import os
 import pytest
 from unittest.mock import patch, MagicMock
-from datetime import datetime
 
 
 @pytest.fixture(autouse=True)
@@ -21,6 +20,7 @@ def env_vars():
 def mock_dynamodb():
     with patch("src.learning.feedback_processor.dynamodb") as mock_ddb:
         table = MagicMock()
+        table.query.return_value = {"Items": []}
         mock_ddb.Table.return_value = table
         yield table
 
@@ -64,9 +64,9 @@ class TestFeedbackProcessor:
     def test_noise_feedback_triggers_suppression_check(self, mock_dynamodb, mock_cloudwatch):
         """Noise feedback should query delivery history for suppression."""
         mock_dynamodb.query.return_value = {"Items": [
-            {"signalId": "s1", "personaId": "persona-sre"},
-            {"signalId": "s2", "personaId": "persona-sre"},
-            {"signalId": "s3", "personaId": "persona-sre"},
+            {"signalId": "s1", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
+            {"signalId": "s2", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
+            {"signalId": "s3", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
         ]}
 
         from src.learning.feedback_processor import handler
@@ -78,13 +78,13 @@ class TestFeedbackProcessor:
         # Should query delivery table for noise history
         mock_dynamodb.query.assert_called_once()
         # 3 noise items >= threshold of 3 → suppression rule created
-        mock_dynamodb.update_item.assert_called_once()
+        assert mock_dynamodb.update_item.call_count == 2
 
     def test_noise_below_threshold_no_suppression(self, mock_dynamodb, mock_cloudwatch):
         """Below threshold noise count should not create suppression rule."""
         mock_dynamodb.query.return_value = {"Items": [
-            {"signalId": "s1", "personaId": "persona-sre"},
-            {"signalId": "s2", "personaId": "persona-sre"},
+            {"signalId": "s1", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
+            {"signalId": "s2", "signalSource": "aws.cloudwatch", "personaId": "persona-sre"},
         ]}
 
         from src.learning.feedback_processor import handler
@@ -94,17 +94,17 @@ class TestFeedbackProcessor:
 
         assert result["batchItemFailures"] == []
         # 2 noise items < threshold of 3 → no suppression rule
-        mock_dynamodb.update_item.assert_not_called()
+        assert mock_dynamodb.update_item.call_args.kwargs["UpdateExpression"].startswith("REMOVE")
 
-    def test_useful_feedback_no_suppression_check(self, mock_dynamodb, mock_cloudwatch):
-        """Non-noise feedback should not trigger suppression check."""
+    def test_useful_feedback_rechecks_suppression(self, mock_dynamodb, mock_cloudwatch):
+        """Useful feedback rechecks the ratio and can revoke learned suppression."""
         from src.learning.feedback_processor import handler
 
         event = {"Records": [_make_stream_record("del-1", "persona-ciso", "sig-1", "useful")]}
         result = handler(event, None)
 
         assert result["batchItemFailures"] == []
-        mock_dynamodb.query.assert_not_called()
+        mock_dynamodb.query.assert_called_once()
         mock_dynamodb.update_item.assert_not_called()
 
     def test_publishes_cloudwatch_metric(self, mock_dynamodb, mock_cloudwatch):

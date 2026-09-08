@@ -1,10 +1,10 @@
 """Audience Router - matches signals to personas based on audience hints, subscriptions, and suppression rules."""
-import json
 import os
 from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
+from shared.runtime import owns, items
 from learning.suppression_model import should_suppress
 
 logger = structlog.get_logger()
@@ -52,6 +52,15 @@ def handler(event, context):
         logger.error("missing_signal_data")
         return {"signal": signal_data, "persona_ids": []}
 
+    if not owns(signal_data):
+        raise PermissionError('Organization mismatch')
+
+    if signal_data.get("_escalation"):
+        targets = signal_data.get("audience_hint", {}).get("personas", [])
+        table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
+        valid = [pid for pid in dict.fromkeys(targets) if eligible(table.get_item(Key={"personaId": pid}).get("Item"), signal_data)]
+        return {"signal": signal_data, "persona_ids": valid}
+
     signal_id = signal_data.get("signal_id", "unknown")
     matched_personas = set()
 
@@ -80,12 +89,21 @@ def handler(event, context):
 
     # Validate personas, apply suppression rules, and check subscriptions
     persona_table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
-    valid_personas = _validate_and_filter_personas(persona_table, list(matched_personas), signal_data)
+    decisions = {"candidates": set(), "suppressed": set()}
+    valid_personas = _validate_and_filter_personas(persona_table, list(matched_personas), signal_data, decisions)
 
     # Strategy 4: Check all personas' subscriptions (may add personas not matched by default routing)
-    subscription_matches = _check_subscriptions(persona_table, signal_data, set(valid_personas))
+    subscription_matches = _check_subscriptions(persona_table, signal_data, set(valid_personas), decisions)
     if subscription_matches:
         valid_personas = list(set(valid_personas) | subscription_matches)
+
+    if (signal_data.get('ingested_at') and decisions['candidates']
+            and decisions['candidates'] == decisions['suppressed'] and not valid_personas):
+        dynamodb.Table(os.environ['SIGNAL_TABLE_NAME']).update_item(
+            Key={'signalId': signal_id, 'ingestedAt': signal_data['ingested_at']},
+            UpdateExpression='SET #status = :suppressed', ConditionExpression='attribute_exists(signalId)',
+            ExpressionAttributeNames={'#status': 'status'}, ExpressionAttributeValues={':suppressed': 'suppressed'})
+        signal_data['status'] = 'suppressed'
 
     logger.info(
         "audience_routed",
@@ -100,6 +118,8 @@ def handler(event, context):
 
 def _resolve_persona_hint(hint: str) -> Optional[str]:
     """Resolve a role hint string to a persona ID."""
+    if hint.startswith("persona-"):
+        return hint
     hint_lower = hint.lower()
     mapping = {
         "ciso": "persona-ciso",
@@ -115,7 +135,7 @@ def _resolve_persona_hint(hint: str) -> Optional[str]:
     return mapping.get(hint_lower)
 
 
-def _validate_and_filter_personas(table, persona_ids: list[str], signal_data: dict) -> list[str]:
+def _validate_and_filter_personas(table, persona_ids: list[str], signal_data: dict, decisions=None) -> list[str]:
     """Validate personas exist and filter out those with active suppression rules."""
     valid = []
     for persona_id in persona_ids:
@@ -123,11 +143,16 @@ def _validate_and_filter_personas(table, persona_ids: list[str], signal_data: di
             response = table.get_item(Key={"personaId": persona_id})
             persona_config = response.get("Item")
 
-            if not persona_config:
+            if not eligible(persona_config, signal_data):
                 continue
+
+            if decisions is not None:
+                decisions["candidates"].add(persona_id)
 
             # Check suppression rules - skip delivery if suppressed
             if should_suppress(signal_data, persona_config):
+                if decisions is not None:
+                    decisions["suppressed"].add(persona_id)
                 logger.info(
                     "persona_suppressed",
                     persona_id=persona_id,
@@ -139,10 +164,11 @@ def _validate_and_filter_personas(table, persona_ids: list[str], signal_data: di
             valid.append(persona_id)
         except Exception as e:
             logger.warning("persona_validation_failed", persona_id=persona_id, error=str(e))
+            raise
     return valid
 
 
-def _check_subscriptions(table, signal_data: dict, already_matched: set) -> set:
+def _check_subscriptions(table, signal_data: dict, already_matched: set, decisions=None) -> set:
     """Check all personas' subscriptions to find additional matches.
 
     Scans personas and evaluates their subscriptions against the signal.
@@ -152,18 +178,16 @@ def _check_subscriptions(table, signal_data: dict, already_matched: set) -> set:
 
     try:
         # Scan all personas (acceptable at MVP scale with ~10s of personas)
-        response = table.scan(
-            ProjectionExpression="personaId, subscriptions, suppressionRules",
-            Limit=200,
-        )
-        personas = response.get("Items", [])
+        personas = items(table)
     except Exception as e:
         logger.warning("subscription_scan_failed", error=str(e))
-        return additional_matches
+        raise
 
     for persona in personas:
+        if not eligible(persona, signal_data):
+            continue
         persona_id = persona.get("personaId", "")
-        if persona_id in already_matched:
+        if persona_id in already_matched or (decisions is not None and persona_id in decisions["candidates"]):
             continue
 
         subscriptions = persona.get("subscriptions", [])
@@ -177,6 +201,8 @@ def _check_subscriptions(table, signal_data: dict, already_matched: set) -> set:
 
             sub_filter = sub.get("filter", {})
             if _signal_matches_subscription(signal_data, sub_filter):
+                if decisions is not None:
+                    decisions["candidates"].add(persona_id)
                 # Check suppression before adding
                 if not should_suppress(signal_data, persona):
                     additional_matches.add(persona_id)
@@ -185,6 +211,8 @@ def _check_subscriptions(table, signal_data: dict, already_matched: set) -> set:
                         persona_id=persona_id,
                         subscription_id=sub.get("id", "unknown"),
                     )
+                elif decisions is not None:
+                    decisions["suppressed"].add(persona_id)
                 break  # One match is enough for this persona
 
     return additional_matches
@@ -199,10 +227,18 @@ def _signal_matches_subscription(signal_data: dict, sub_filter: dict) -> bool:
     if not sub_filter:
         return False
 
+    try:
+        from shared.personas import SubscriptionFilter
+        SubscriptionFilter.model_validate(sub_filter)
+    except ValueError:
+        return False
+    if 'account_ids' in sub_filter and signal_data.get('context', {}).get('account_id') not in sub_filter['account_ids']:
+        return False
+
     # Check sources
     if "sources" in sub_filter:
         signal_source = signal_data.get("source", "")
-        if not any(signal_source.startswith(s) or s == signal_source for s in sub_filter["sources"]):
+        if not any(signal_source.startswith(s + ".") or s == signal_source for s in sub_filter["sources"]):
             return False
 
     # Check severity_min
@@ -215,7 +251,7 @@ def _signal_matches_subscription(signal_data: dict, sub_filter: dict) -> bool:
     # Check regions
     if "regions" in sub_filter:
         signal_region = signal_data.get("context", {}).get("region", "")
-        if signal_region and signal_region not in sub_filter["regions"]:
+        if signal_region not in sub_filter["regions"]:
             return False
 
     # Check tags
@@ -228,7 +264,7 @@ def _signal_matches_subscription(signal_data: dict, sub_filter: dict) -> bool:
     # Check signal_types
     if "signal_types" in sub_filter:
         signal_type = signal_data.get("signal_type", "")
-        if signal_type and signal_type not in sub_filter["signal_types"]:
+        if signal_type not in sub_filter["signal_types"]:
             return False
 
     # Check keywords (any keyword in title or raw_detail)
@@ -240,3 +276,7 @@ def _signal_matches_subscription(signal_data: dict, sub_filter: dict) -> bool:
             return False
 
     return True
+
+
+def eligible(persona, signal):
+    return bool(persona and owns(persona) and (not persona.get('accountIds') or signal.get('context', {}).get('account_id') in persona['accountIds']))

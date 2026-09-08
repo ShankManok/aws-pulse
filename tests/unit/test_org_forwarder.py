@@ -1,5 +1,4 @@
 """Unit tests for the cross-account org forwarder."""
-import json
 import os
 import pytest
 from unittest.mock import patch, MagicMock
@@ -53,10 +52,10 @@ class TestOrgForwarder:
 
         assert result["statusCode"] == 201
         assert result["processed"] is True
-        mock_kinesis.put_record.assert_called_once()
+        mock_kinesis.put_record.assert_not_called()
 
         # Verify signal content
-        call_data = json.loads(mock_kinesis.put_record.call_args.kwargs["Data"])
+        call_data = mock_dynamodb.put_item.call_args.kwargs["Item"]
         assert call_data["source"] == "aws.cloudwatch"
         assert call_data["signal_type"] == "incident"
         assert call_data["context"]["account_id"] == "987654321098"
@@ -86,7 +85,7 @@ class TestOrgForwarder:
         result = handler(event, None)
 
         assert result["statusCode"] == 201
-        call_data = json.loads(mock_kinesis.put_record.call_args.kwargs["Data"])
+        call_data = mock_dynamodb.put_item.call_args.kwargs["Item"]
         assert call_data["signal_type"] == "finding"
         assert call_data["severity"]["level"] == "high"
         assert call_data["severity"]["score"] == 80
@@ -115,7 +114,7 @@ class TestOrgForwarder:
         result = handler(event, None)
 
         assert result["statusCode"] == 201
-        call_data = json.loads(mock_kinesis.put_record.call_args.kwargs["Data"])
+        call_data = mock_dynamodb.put_item.call_args.kwargs["Item"]
         assert call_data["signal_type"] == "finding"
         assert call_data["severity"]["level"] == "high"
         assert call_data["severity"]["score"] == 80
@@ -142,7 +141,7 @@ class TestOrgForwarder:
         result = handler(event, None)
 
         assert result["statusCode"] == 201
-        call_data = json.loads(mock_kinesis.put_record.call_args.kwargs["Data"])
+        call_data = mock_dynamodb.put_item.call_args.kwargs["Item"]
         assert call_data["signal_type"] == "incident"
         assert "EC2" in call_data["content"]["title"]
         assert "arn:aws:ec2" in call_data["context"]["resource_arns"][0]
@@ -162,7 +161,7 @@ class TestOrgForwarder:
 
         handler(event, None)
 
-        call_data = json.loads(mock_kinesis.put_record.call_args.kwargs["Data"])
+        call_data = mock_dynamodb.put_item.call_args.kwargs["Item"]
         assert call_data["context"]["tags"]["cross_account"] == "true"
 
     def test_partition_key_uses_account_id(self, mock_kinesis, mock_dynamodb):
@@ -180,5 +179,5 @@ class TestOrgForwarder:
 
         handler(event, None)
 
-        call_kwargs = mock_kinesis.put_record.call_args.kwargs
-        assert call_kwargs["PartitionKey"] == "555666777888"
+        item = mock_dynamodb.put_item.call_args.kwargs["Item"]
+        assert item["context"]["account_id"] == "555666777888"

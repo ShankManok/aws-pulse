@@ -1,5 +1,6 @@
 # Persona Configuration Guide
 
+> Current implementation limits and authentication changes: see the [code and feature review](review.md). Earlier examples and target-state claims must be read with that review.
 ## Overview
 
 Personas define who gets notified, how content is tailored, and through which channels. Each persona has a role template, language level, delivery preferences, subscriptions, and suppression rules.

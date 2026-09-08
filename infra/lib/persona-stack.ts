@@ -105,6 +105,9 @@ export class PersonaStack extends cdk.Stack {
       },
     });
     this.personaTable.grantReadData(audienceRouter);
+    audienceRouter.addEnvironment('SIGNAL_TABLE_NAME', `pulse-events-${props.stage}`);
+    audienceRouter.addToRolePolicy(new iam.PolicyStatement({ actions: ['dynamodb:UpdateItem'],
+      resources: [this.formatArn({ service: 'dynamodb', resource: 'table', resourceName: `pulse-events-${props.stage}` })] }));
 
     // --- Content Transformer Lambda ---
     const contentTransformer = new lambda.Function(this, 'ContentTransformer', {
@@ -150,7 +153,7 @@ export class PersonaStack extends cdk.Stack {
     }));
 
     emailSender.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:PutItem'],
+      actions: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
       resources: [`arn:aws:dynamodb:*:*:table/${props.deliveryTableName}`],
     }));
 
@@ -171,10 +174,17 @@ export class PersonaStack extends cdk.Stack {
       },
     });
 
-    this.chatbotSnsTopic.grantPublish(slackSender);
+    const slackDestinations: Record<string, string> = this.node.tryGetContext('slackDestinations') || {};
+    for (const arn of Object.values(slackDestinations)) {
+      if (!/^arn:aws[a-z-]*:sns:[a-z0-9-]+:\d{12}:[A-Za-z0-9_-]+$/.test(arn)) throw new Error('Invalid Slack SNS destination ARN');
+    }
+    slackSender.addEnvironment('SLACK_DESTINATIONS', this.toJsonString(slackDestinations));
+    if (Object.keys(slackDestinations).length) {
+      slackSender.addToRolePolicy(new iam.PolicyStatement({ actions: ['sns:Publish'], resources: Object.values(slackDestinations) }));
+    }
 
     slackSender.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['dynamodb:PutItem'],
+      actions: ['dynamodb:PutItem', 'dynamodb:GetItem', 'dynamodb:UpdateItem'],
       resources: [`arn:aws:dynamodb:*:*:table/${props.deliveryTableName}`],
     }));
 
@@ -298,7 +308,8 @@ export class PersonaStack extends cdk.Stack {
         sfn.Condition.stringEquals('$.delivery.channel', 'slack'),
         deliverSlackStep,
       )
-      .otherwise(deliverEmailStep);
+      .when(sfn.Condition.stringEquals('$.delivery.channel', 'email'), deliverEmailStep)
+      .otherwise(new sfn.Fail(this, 'UnsupportedChannel', { error: 'UnsupportedChannel' }));
 
     // Map state iterates over transformations (persona × channel)
     const deliverMap = new sfn.Map(this, 'DeliverToRecipients', {
@@ -322,11 +333,17 @@ export class PersonaStack extends cdk.Stack {
       timeout: cdk.Duration.minutes(5),
     });
 
-    // Now wire the workflow ARN into the escalation handler (same stack, no cycle)
-    escalationHandler.addEnvironment('PERSONA_WORKFLOW_ARN', this.personaWorkflow.stateMachineArn);
+    // Use the known physical name to avoid a CloudFormation dependency cycle:
+    // workflow -> schedule Lambda -> escalation Lambda -> workflow.
+    const workflowArn = this.formatArn({
+      service: 'states', resource: 'stateMachine',
+      resourceName: `pulse-persona-workflow-${props.stage}`,
+      arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+    });
+    escalationHandler.addEnvironment('PERSONA_WORKFLOW_ARN', workflowArn);
     escalationHandler.addToRolePolicy(new iam.PolicyStatement({
       actions: ['states:StartExecution'],
-      resources: [this.personaWorkflow.stateMachineArn],
+      resources: [workflowArn],
     }));
 
     // --- Seed MVP personas via custom resource ---
@@ -422,6 +439,7 @@ export class PersonaStack extends cdk.Stack {
       },
     });
 
+    subscriptionAgent.addEnvironment('API_ACCOUNT_IDS', this.account);
     this.personaTable.grantReadWriteData(subscriptionAgent);
 
     subscriptionAgent.addToRolePolicy(new iam.PolicyStatement({
@@ -439,7 +457,9 @@ export class PersonaStack extends cdk.Stack {
     const personasResource = personaApi.root.addResource('v1').addResource('personas');
     const personaIdResource = personasResource.addResource('{personaId}');
     const subscribeResource = personaIdResource.addResource('subscribe');
-    subscribeResource.addMethod('POST', new apigateway.LambdaIntegration(subscriptionAgent));
+    subscribeResource.addMethod('POST', new apigateway.LambdaIntegration(subscriptionAgent), {
+      authorizationType: apigateway.AuthorizationType.IAM,
+    });
 
     // --- Outputs ---
     new cdk.CfnOutput(this, 'PersonaTableName', { value: this.personaTable.tableName });

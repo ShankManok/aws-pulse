@@ -1,8 +1,7 @@
 """Unit tests for the NRS calculator."""
 import os
 import pytest
-from unittest.mock import patch, MagicMock, call
-from decimal import Decimal
+from unittest.mock import patch, MagicMock
 
 
 @pytest.fixture(autouse=True)
@@ -39,12 +38,11 @@ class TestNrsCalculator:
         call_count = [0]
         def scan_side_effect(**kwargs):
             call_count[0] += 1
-            filter_expr = kwargs.get("FilterExpression", "")
             if "#status" in str(kwargs.get("ExpressionAttributeNames", {})):
                 status = kwargs["ExpressionAttributeValues"].get(":status", "")
                 if status == "suppressed":
                     return {"Count": 10}
-                elif status == "correlated":
+                elif status == "deduplicated":
                     return {"Count": 20}
             else:
                 # Total count (no status filter)
@@ -84,7 +82,7 @@ class TestNrsCalculator:
                     status = kwargs["ExpressionAttributeValues"].get(":status", "")
                     if status == "suppressed":
                         return {"Count": 10}
-                    elif status == "correlated":
+                    elif status == "deduplicated":
                         return {"Count": 20}
                 return {"Count": 100}
 

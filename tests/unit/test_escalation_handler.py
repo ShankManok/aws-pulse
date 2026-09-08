@@ -3,7 +3,6 @@ import json
 import os
 import pytest
 from unittest.mock import patch, MagicMock
-from datetime import datetime
 
 
 @pytest.fixture(autouse=True)

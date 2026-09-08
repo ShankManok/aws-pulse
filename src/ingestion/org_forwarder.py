@@ -16,6 +16,11 @@ from shared.models import (
     SignalContext, AudienceHint, SignalType,
 )
 from shared.config import Config
+from shared.ingest import persist
+try:
+    from normalizer import normalize_cloudwatch_alarm, normalize_security_hub_finding
+except ModuleNotFoundError:
+    from ingestion.normalizer import normalize_cloudwatch_alarm, normalize_security_hub_finding
 
 logger = structlog.get_logger()
 kinesis = boto3.client("kinesis")
@@ -62,29 +67,27 @@ def handler(event, context):
         region=region,
     )
 
-    # Normalize to SignalEvent
-    signal = _normalize_event(source, detail_type, detail, account_id, region, event_time)
-
-    if not signal:
-        logger.info("event_skipped", source=source, detail_type=detail_type)
-        return {"statusCode": 200, "processed": False}
+    # Security Hub batches can contain multiple independent findings.
+    if source == "aws.securityhub" and len(detail.get("findings", [])) > 1:
+        results = [handler({**event, "detail": {**detail, "findings": [finding]}}, context)
+                   for finding in detail["findings"]]
+        return {"statusCode": 201, "processed": True, "signalIds": [r["signalId"] for r in results]}
+    if source == "aws.cloudwatch" and detail_type == "CloudWatch Alarm State Change":
+        signal = normalize_cloudwatch_alarm(event)
+    elif source == "aws.securityhub":
+        signal = normalize_security_hub_finding(event)
+    else:
+        signal = _normalize_event(source, detail_type, detail, account_id, region, event_time)
+    signal.context.tags["cross_account"] = str(account_id != os.environ.get("AWS_ACCOUNT_ID", "")).lower()
+    if event.get("resources"):
+        signal.context.resource_arns = list(set(signal.context.resource_arns + event["resources"]))
 
     # Publish to Kinesis + DynamoDB
-    stream_name = os.environ.get("SIGNAL_STREAM_NAME", Config.SIGNAL_STREAM_NAME)
     signal_table_name = os.environ.get("SIGNAL_TABLE_NAME", Config.SIGNAL_TABLE_NAME)
 
-    signal_dict = signal.to_dynamo()
-
-    if stream_name:
-        kinesis.put_record(
-            StreamName=stream_name,
-            Data=json.dumps(signal_dict),
-            PartitionKey=account_id or signal.signal_id,
-        )
-
-    if signal_table_name:
-        table = dynamodb.Table(signal_table_name)
-        table.put_item(Item=signal_dict)
+    finding = detail.get('findings', [{}])[0] if source == 'aws.securityhub' else {}
+    event_key = f"{event['id']}:{finding.get('Id', finding.get('Title', ''))}" if event.get('id') else None
+    signal_id = persist(signal, dynamodb.Table(signal_table_name), event_key)
 
     logger.info(
         "cross_account_signal_published",
@@ -93,7 +96,7 @@ def handler(event, context):
         account_id=account_id,
     )
 
-    return {"statusCode": 201, "processed": True, "signalId": signal.signal_id}
+    return {"statusCode": 201, "processed": True, "signalId": signal_id}
 
 
 def _normalize_event(
@@ -138,7 +141,7 @@ def _normalize_event(
         context=SignalContext(
             account_id=account_id,
             region=region,
-            resource_arns=resource_arns,
+            resource_arns=[arn.replace("ec2:::instance/", f"ec2:{region}:{account_id}:instance/") for arn in resource_arns],
             tags={"cross_account": "true"},
         ),
         audience_hint=AudienceHint(
