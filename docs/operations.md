@@ -7,7 +7,6 @@ Use an isolated sandbox deployment for one trusted organization. The default org
 Before a live smoke test:
 
 - For GitHub Actions deployment, create the IAM role in the deployer's AWS account and store its complete ARN as the `AWS_ROLE_ARN` secret in the repository's `dev` environment. The source-controlled workflow contains only `${{ secrets.AWS_ROLE_ARN }}`. Public forks do not inherit this secret. See the [OIDC setup](deployment.md#github-actions-oidc-setup); never commit the real ARN or static AWS credentials.
-
 - Set `sesDomain` CDK context to a verified SES domain and replace seeded example recipients through the persona API. SES identities and inbox receipt are not provisioned or verified by these tests.
 - Set `slackDestinations` CDK context to a JSON object mapping each member's Slack recipient identifier to its authorized SNS topic ARN. Connect those topics to the intended Chatbot channels. An unconfigured recipient fails before a send claim is created.
 - Populate the Secrets Manager secret identified by `WebhookSecretArn` with `PAGERDUTY_WEBHOOK_SECRET`, `DATADOG_WEBHOOK_API_KEY`, `SERVICENOW_WEBHOOK_USER` and `SERVICENOW_WEBHOOK_PASS` as needed. Do not put credential values in CDK context or source control.
