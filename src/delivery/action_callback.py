@@ -12,11 +12,30 @@ import boto3
 import structlog
 from botocore.exceptions import ClientError
 
+from shared.runtime import owns, response, tenant
+from shared.feedback_actions import follow_up
+
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
 
 
 def handler(event, context):
+    if "internalFeedback" in event:
+        request = event["internalFeedback"]
+        if request.get('orgId') != tenant():
+            return response(403, {'error': 'Organization mismatch'})
+        table = dynamodb.Table(os.environ['DELIVERY_TABLE_NAME'])
+        record = table.get_item(Key={'deliveryId': request['deliveryId']}, ConsistentRead=True).get('Item', {})
+        if not record or not owns(record):
+            return response(404, {'error': 'Delivery not found'})
+        action = request['feedback']
+        if action not in ('useful', 'noise', 'escalate', 'resolved'):
+            return response(400, {'error': 'Invalid feedback'})
+        follow_up(record, action)
+        field = 'resolvedAt' if action == 'resolved' else 'acknowledgedAt' if action == 'useful' else 'actionAt'
+        table.update_item(Key={'deliveryId': request['deliveryId']}, UpdateExpression=f'SET feedback = :f, {field} = if_not_exists({field}, :now)',
+                          ExpressionAttributeValues={':f': action, ':now': datetime.utcnow().isoformat() + 'Z'})
+        return response(200, {'deliveryId': request['deliveryId'], 'action': action})
     params = event.get("pathParameters") or {}
     delivery_id, action = params.get("deliveryId"), params.get("action")
     if not delivery_id or action not in ("acknowledge", "escalate", "suppress"):
@@ -37,6 +56,8 @@ def handler(event, context):
     try:
         table = dynamodb.Table(os.environ["DELIVERY_TABLE_NAME"])
         record = table.get_item(Key={"deliveryId": delivery_id}, ConsistentRead=True).get("Item", {})
+        if not owns(record):
+            return _response(403, {"error": "Organization mismatch"})
         expected = record.get("actionTokenHash", "")
         if (not expected or not hmac.compare_digest(expected, digest)
                 or int(record.get("actionTokenExpiresAt", 0)) <= time.time()):
@@ -63,6 +84,7 @@ def handler(event, context):
         elif action == "escalate":
             # Records the request; immediate escalation orchestration remains a deployment gate.
             update += ", escalationRequestedAt = :ts"
+        follow_up(record, _map_action_to_feedback(action))
         table.update_item(
             Key={"deliveryId": delivery_id}, UpdateExpression=update,
             ConditionExpression="attribute_exists(deliveryId) AND actionTokenHash = :hash AND actionTokenExpiresAt > :now AND attribute_not_exists(actionAt)",

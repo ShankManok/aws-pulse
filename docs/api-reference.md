@@ -1,6 +1,6 @@
 # API Reference
 
-See [review and SDK/API availability](review.md#sdkapi-availability) before using SDK methods. Several methods have no backend route. Publish curl examples below also need SigV4 signing, e.g. curl `--aws-sigv4` with temporary AWS credentials.
+See [review and SDK/API availability](review.md#sdkapi-availability) before using SDK methods. All SDK routes now share the main API. Publish curl examples below also need SigV4 signing, e.g. curl `--aws-sigv4` with temporary AWS credentials.
 
 ## Base URLs
 
@@ -17,7 +17,7 @@ Get URLs from CDK outputs after deployment.
 - **Publish API**: Requires IAM SigV4 authorization **and** `x-api-key` (usage plan)
 - **Webhook endpoints**: Provider-specific auth (see docs/webhooks.md)
 - **Subscription API**: IAM SigV4 authorization
-- **SDK clients**: SigV4 plus `api_key` for publishing
+- **SDK clients**: SigV4 plus `api_key` on all main API routes
 - **Action callbacks**: Delivery-scoped token, 24-hour expiry, one confirmed response
 
 ---
@@ -145,7 +145,7 @@ Record an action on a delivered notification (from email buttons or API).
 }
 ```
 
-**GET** requires the token and displays a confirmation form without mutation. **POST** verifies the token and conditionally records one response. Unsigned legacy links are rejected. Suppress records noise feedback; escalate records an escalation request, not immediate dispatch.
+**GET** requires the token and displays a confirmation form without mutation. **POST** verifies the token and conditionally records one response. Unsigned legacy links are rejected. Suppress creates a source/type/severity-scoped 24-hour rule for nonurgent signals; escalate invokes the next configured escalation target.
 
 ---
 

@@ -4,13 +4,14 @@ Queries CloudWatch metrics for monitored resources, performs linear regression o
 the last 24h of data points, and generates predictive SignalEvents when a metric
 is projected to breach its threshold within 72 hours.
 """
-import json
 import os
 from datetime import datetime, timedelta
 from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
+from shared.ingest import persist
+from shared.runtime import items
 from shared.models import SignalEvent, SignalContent, Severity, SeverityLevel, SignalContext, AudienceHint
 
 logger = structlog.get_logger()
@@ -55,6 +56,7 @@ def handler(event, context):
                 predictor_id=predictor.get("predictorId", "unknown"),
                 error=str(e),
             )
+            raise
 
     logger.info("prediction_cycle_complete", predictions_generated=predictions_generated)
     return {"statusCode": 200, "predictions_generated": predictions_generated}
@@ -63,15 +65,14 @@ def handler(event, context):
 def _load_predictors(table) -> list[dict]:
     """Load all active predictor configurations from DynamoDB."""
     try:
-        response = table.scan(
+        return items(table,
             FilterExpression="enabled = :enabled",
             ExpressionAttributeValues={":enabled": True},
             Limit=100,
         )
-        return response.get("Items", [])
     except Exception as e:
         logger.error("predictors_load_failed", error=str(e))
-        return []
+        raise
 
 
 def _evaluate_predictor(predictor: dict) -> Optional[SignalEvent]:
@@ -177,7 +178,7 @@ def _get_metric_data(
 
     except Exception as e:
         logger.warning("metric_query_failed", namespace=namespace, metric=metric_name, error=str(e))
-        return []
+        raise
 
 
 def _extrapolate_time_to_breach(
@@ -260,16 +261,7 @@ def _score_from_hours(hours: float) -> int:
 
 def _publish_prediction(signal: SignalEvent, stream_name: str, signal_table):
     """Publish predictive signal to Kinesis and DynamoDB."""
-    signal_dict = signal.to_event()
-
-    signal_table.put_item(Item=signal.to_dynamo())
-
-    if stream_name:
-        kinesis.put_record(
-            StreamName=stream_name,
-            Data=json.dumps(signal_dict),
-            PartitionKey=signal.context.account_id or signal.signal_id,
-        )
+    persist(signal, signal_table)
 
     logger.info(
         "prediction_published",

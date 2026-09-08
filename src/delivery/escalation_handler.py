@@ -7,6 +7,7 @@ from typing import Optional
 import boto3
 import structlog
 from shared.config import Config
+from shared.runtime import owns, dumps
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -45,15 +46,18 @@ def handler(event, context):
 
     # Check if delivery was acknowledged
     try:
-        response = table.get_item(Key={"deliveryId": delivery_id})
+        response = table.get_item(Key={"deliveryId": delivery_id}, ConsistentRead=True)
         record = response.get("Item")
     except Exception as e:
         logger.error("delivery_lookup_failed", delivery_id=delivery_id, error=str(e))
-        return {"statusCode": 500, "escalated": False, "error": str(e)}
+        raise
 
     if not record:
         logger.warning("delivery_record_not_found", delivery_id=delivery_id)
         return {"statusCode": 404, "escalated": False}
+
+    if not owns(record) or not owns(signal_data):
+        raise PermissionError('Organization mismatch')
 
     # If acknowledged, clean up and exit
     if record.get("acknowledgedAt"):
@@ -69,17 +73,6 @@ def handler(event, context):
         escalation_chain=escalation_chain,
     )
 
-    # Mark original delivery as escalated
-    now = datetime.utcnow().isoformat() + "Z"
-    try:
-        table.update_item(
-            Key={"deliveryId": delivery_id},
-            UpdateExpression="SET escalated = :escalated, escalatedAt = :ts",
-            ExpressionAttributeValues={":escalated": True, ":ts": now},
-        )
-    except Exception as e:
-        logger.warning("escalation_mark_failed", delivery_id=delivery_id, error=str(e))
-
     # Determine next persona in escalation chain
     next_persona_id = _get_next_persona(current_persona_id, escalation_chain)
 
@@ -92,7 +85,19 @@ def handler(event, context):
     workflow_arn = os.environ.get("PERSONA_WORKFLOW_ARN", "")
     if not workflow_arn:
         raise RuntimeError("PERSONA_WORKFLOW_ARN is required for escalation")
-    _trigger_escalation_workflow(workflow_arn, signal_data, next_persona_id)
+    _trigger_escalation_workflow(workflow_arn, {**signal_data, "audience_hint": {**signal_data.get("audience_hint", {}), "escalation_chain": escalation_chain}}, next_persona_id)
+
+    # Mark original delivery as escalated
+    now = datetime.utcnow().isoformat() + "Z"
+    try:
+        table.update_item(
+            Key={"deliveryId": delivery_id},
+            UpdateExpression="SET escalated = :escalated, escalatedAt = :ts",
+            ExpressionAttributeValues={":escalated": True, ":ts": now},
+        )
+    except Exception as e:
+        logger.warning("escalation_mark_failed", delivery_id=delivery_id, error=str(e))
+        raise
 
     # Clean up the one-time schedule
     _cleanup_schedule(schedule_name)
@@ -125,18 +130,17 @@ def _get_next_persona(current_persona_id: str, escalation_chain: list) -> Option
         if persona_id != current_persona_id:
             return persona_id
 
-    return None
 
 
 def _trigger_escalation_workflow(workflow_arn: str, signal_data: dict, next_persona_id: str):
     """Start persona workflow targeting a specific persona for escalation."""
     try:
         # Modify audience hint to target only the escalation persona
-        signal_data_copy = json.loads(json.dumps(signal_data))
+        signal_data_copy = json.loads(dumps(signal_data))
         signal_data_copy["audience_hint"] = {
             "personas": [next_persona_id],
-            "escalation_chain": [],  # Don't re-escalate an escalation
-            "sla_acknowledge_minutes": 0,
+            "escalation_chain": list(dict.fromkeys(signal_data.get("audience_hint", {}).get("escalation_chain", []))),
+            "sla_acknowledge_minutes": signal_data.get("audience_hint", {}).get("sla_acknowledge_minutes", 30),
         }
         signal_data_copy["_escalation"] = True
 

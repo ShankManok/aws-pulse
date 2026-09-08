@@ -1,11 +1,12 @@
 """Email delivery via SES with persona-specific HTML templates."""
 from html import escape
 import os
-from datetime import datetime
+import hashlib
 import boto3
 import structlog
 from shared.config import Config
-from shared.action_tokens import new_token, action_url
+from shared.action_tokens import action_url
+from shared.delivery_state import reserve, complete
 
 logger = structlog.get_logger()
 ses = boto3.client("ses")
@@ -68,10 +69,13 @@ def handler(event, context):
     delivery_ids = []
     failed = []
 
-    for idx, recipient in enumerate(recipients):
-        delivery_id = f"del-{signal_id}-{persona_id}-{idx}"
+    for recipient in dict.fromkeys(recipients):
+        delivery_id = "del-" + hashlib.sha256(f"{signal_id}:{persona_id}:email:{recipient}:{signal.get('_escalation', False)}".encode()).hexdigest()
 
-        token, token_hash = new_token()
+        token = reserve(table, delivery_id, signal, {**delivery, 'channel': 'email'}, recipient)
+        if token is None:
+            delivery_ids.append(delivery_id)
+            continue
         html_body = _build_html(
             severity_level=severity_level,
             color=color,
@@ -94,21 +98,7 @@ def handler(event, context):
                 },
             )
 
-            # Record delivery for audit trail
-            now = datetime.utcnow().isoformat() + "Z"
-            table.put_item(Item={
-                "deliveryId": delivery_id,
-                "actionTokenHash": token_hash,
-                "actionTokenExpiresAt": int(datetime.utcnow().timestamp()) + 86400,
-                "signalId": signal_id,
-                "signalSource": source,
-                "personaId": persona_id,
-                "recipientId": recipient,
-                "channel": "email",
-                "contentVersion": str(hash(content))[:12],
-                "deliveredAt": now,
-                "escalated": False,
-            })
+            complete(table, delivery_id)
 
             delivery_ids.append(delivery_id)
             logger.info("email_sent", recipient=recipient, signal_id=signal_id, persona_id=persona_id)

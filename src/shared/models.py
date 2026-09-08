@@ -31,6 +31,7 @@ class SignalStatus(str, Enum):
     DELIVERED = "delivered"
     ACKNOWLEDGED = "acknowledged"
     SUPPRESSED = "suppressed"
+    DEDUPLICATED = "deduplicated"
 
 
 class BlastRadius(BaseModel):
@@ -52,7 +53,7 @@ class RecommendedAction(BaseModel):
 
 
 class SignalContent(BaseModel):
-    title: str
+    title: str = Field(min_length=1, max_length=1000)
     raw_detail: str = ""
     structured_data: dict = Field(default_factory=dict)
     recommended_actions: list[RecommendedAction] = Field(default_factory=list)
@@ -70,18 +71,19 @@ class SignalContext(BaseModel):
 class AudienceHint(BaseModel):
     personas: list[str] = Field(default_factory=list)
     escalation_chain: list[str] = Field(default_factory=list)
-    sla_acknowledge_minutes: int = 30
+    sla_acknowledge_minutes: int = Field(default=30, ge=1, le=10080)
 
 
 class Correlation(BaseModel):
     correlation_id: Optional[str] = None
-    time_window_seconds: int = 300
+    time_window_seconds: int = Field(default=300, ge=1, le=3600)
 
 
 class SignalEvent(BaseModel):
     """Canonical signal event schema."""
     signal_id: str = Field(default_factory=lambda: str(ulid.new()))
-    source: str
+    org_id: str = "default"
+    source: str = Field(min_length=1, max_length=256)
     signal_type: SignalType
     severity: Severity
     content: SignalContent

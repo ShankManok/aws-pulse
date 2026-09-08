@@ -2,6 +2,7 @@ import * as cdk from 'aws-cdk-lib';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
 
 export interface DeliveryStackProps extends cdk.StackProps {
@@ -80,6 +81,12 @@ export class DeliveryStack extends cdk.Stack {
       },
     });
     this.deliveryTable.grantReadWriteData(actionCallback);
+    actionCallback.addEnvironment('PERSONA_TABLE_NAME', `pulse-personas-${props.stage}`);
+    actionCallback.addEnvironment('ESCALATION_FUNCTION_NAME', `pulse-escalation-handler-${props.stage}`);
+    actionCallback.addToRolePolicy(new iam.PolicyStatement({ actions: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+      resources: [this.formatArn({ service: 'dynamodb', resource: 'table', resourceName: `pulse-personas-${props.stage}` })] }));
+    actionCallback.addToRolePolicy(new iam.PolicyStatement({ actions: ['lambda:InvokeFunction'],
+      resources: [this.formatArn({ service: 'lambda', resource: 'function', resourceName: `pulse-escalation-handler-${props.stage}`, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })] }));
 
     // --- Action Callback API Gateway ---
     const callbackApi = new apigateway.RestApi(this, 'CallbackApi', {

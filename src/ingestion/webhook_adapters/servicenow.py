@@ -3,6 +3,10 @@ import base64
 import hmac
 import json
 import os
+from shared.ingest import persist
+from shared.webhooks import secret
+from shared.runtime import body as decode_body
+import hashlib
 import boto3
 import structlog
 from shared.models import SignalEvent, SignalContent, Severity, SeverityLevel, SignalContext, AudienceHint
@@ -38,8 +42,7 @@ def handler(event, context):
 
     Validates Basic Auth credentials and normalizes to SignalEvent.
     """
-    headers = event.get("headers", {})
-    body = event.get("body", "")
+    headers = {key.lower(): value for key, value in (event.get("headers") or {}).items()}
 
     # Validate Basic Auth
     auth_header = headers.get("Authorization") or headers.get("authorization", "")
@@ -48,42 +51,34 @@ def handler(event, context):
         return {"statusCode": 401, "body": json.dumps({"error": "Invalid credentials"})}
 
     try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, TypeError):
+        payload = decode_body(event)
+    except (ValueError, TypeError, UnicodeDecodeError):
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON body"})}
 
     # Normalize to SignalEvent
-    signal = _normalize_incident(payload)
+    try:
+        signal = _normalize_incident(payload)
+    except (ValueError, TypeError, AttributeError):
+        return {"statusCode": 400, "body": json.dumps({"error": "Invalid provider payload"})}
 
-    # Write to Kinesis + DynamoDB
-    stream_name = os.environ.get("SIGNAL_STREAM_NAME", "")
+    # Persist atomically; the DynamoDB outbox forwards to Kinesis
     table_name = os.environ.get("SIGNAL_TABLE_NAME", "")
 
-    signal_dict = signal.to_event()
-
-    if table_name:
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=signal.to_dynamo())
-
-    if stream_name:
-        kinesis.put_record(
-            StreamName=stream_name,
-            Data=json.dumps(signal_dict),
-            PartitionKey=signal.context.account_id or signal.signal_id,
-        )
+    key = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    sid = persist(signal, dynamodb.Table(table_name), f"servicenow:{key}" if key else None)
 
     logger.info("servicenow_signal_ingested", signal_id=signal.signal_id, number=payload.get("number"))
 
     return {
         "statusCode": 201,
-        "body": json.dumps({"signalId": signal.signal_id, "status": "new"}),
+        "body": json.dumps({"signalId": sid, "status": "new"}),
     }
 
 
 def _validate_basic_auth(auth_header: str) -> bool:
     """Validate Basic Auth credentials."""
-    expected_user = os.environ.get("SERVICENOW_WEBHOOK_USER", "")
-    expected_pass = os.environ.get("SERVICENOW_WEBHOOK_PASS", "")
+    expected_user = secret("SERVICENOW_WEBHOOK_USER")
+    expected_pass = secret("SERVICENOW_WEBHOOK_PASS")
 
     if not expected_user or not expected_pass:
         logger.warning("servicenow_no_auth_configured")

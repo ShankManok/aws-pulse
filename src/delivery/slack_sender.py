@@ -1,11 +1,12 @@
 """Slack delivery via AWS Chatbot with interactive notification messages."""
 import json
 import os
-from datetime import datetime
+import hashlib
 import boto3
 import structlog
 from shared.config import Config
-from shared.action_tokens import new_token, action_url
+from shared.action_tokens import action_url
+from shared.delivery_state import reserve, complete
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -71,7 +72,7 @@ def handler(event, context):
     account_id = signal.get("context", {}).get("account_id", "")
     region = signal.get("context", {}).get("region", "")
 
-    sns_topic_arn = os.environ.get("CHATBOT_SNS_TOPIC_ARN", "")
+    destinations = json.loads(os.environ.get("SLACK_DESTINATIONS", "{}"))
     delivery_table_name = os.environ.get("DELIVERY_TABLE_NAME", Config.DELIVERY_TABLE_NAME)
     callback_base = os.environ.get("CALLBACK_API_URL", "").rstrip("/")
     table = dynamodb.Table(delivery_table_name)
@@ -79,10 +80,16 @@ def handler(event, context):
     delivery_ids = []
     failed = []
 
-    for idx, recipient in enumerate(recipients):
-        delivery_id = f"del-{signal_id}-{persona_id}-slack-{idx}"
+    for recipient in dict.fromkeys(recipients):
+        sns_topic_arn = destinations.get(recipient)
+        if not sns_topic_arn:
+            raise ValueError(f"No Slack destination configured for {recipient}")
+        delivery_id = "del-" + hashlib.sha256(f"{signal_id}:{persona_id}:slack:{recipient}:{signal.get('_escalation', False)}".encode()).hexdigest()
 
-        token, token_hash = new_token()
+        token = reserve(table, delivery_id, signal, {**delivery, 'channel': 'slack'}, recipient)
+        if token is None:
+            delivery_ids.append(delivery_id)
+            continue
         # Build Slack-formatted message via SNS
         slack_message = _build_slack_message(
             severity_level=severity_level,
@@ -114,21 +121,7 @@ def handler(event, context):
                 },
             )
 
-            # Record delivery for audit trail
-            now = datetime.utcnow().isoformat() + "Z"
-            table.put_item(Item={
-                "deliveryId": delivery_id,
-                "actionTokenHash": token_hash,
-                "actionTokenExpiresAt": int(datetime.utcnow().timestamp()) + 86400,
-                "signalId": signal_id,
-                "signalSource": source,
-                "personaId": persona_id,
-                "recipientId": recipient,
-                "channel": "slack",
-                "contentVersion": str(hash(content))[:12],
-                "deliveredAt": now,
-                "escalated": False,
-            })
+            complete(table, delivery_id)
 
             delivery_ids.append(delivery_id)
             logger.info("slack_sent", recipient=recipient, signal_id=signal_id, persona_id=persona_id)

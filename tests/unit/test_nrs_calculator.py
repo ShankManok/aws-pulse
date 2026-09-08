@@ -42,7 +42,7 @@ class TestNrsCalculator:
                 status = kwargs["ExpressionAttributeValues"].get(":status", "")
                 if status == "suppressed":
                     return {"Count": 10}
-                elif status == "correlated":
+                elif status == "deduplicated":
                     return {"Count": 20}
             else:
                 # Total count (no status filter)
@@ -82,7 +82,7 @@ class TestNrsCalculator:
                     status = kwargs["ExpressionAttributeValues"].get(":status", "")
                     if status == "suppressed":
                         return {"Count": 10}
-                    elif status == "correlated":
+                    elif status == "deduplicated":
                         return {"Count": 20}
                 return {"Count": 100}
 

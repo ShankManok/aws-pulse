@@ -6,3 +6,6 @@ os.environ["AWS_ACCESS_KEY_ID"] = "testing"
 os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
 os.environ["AWS_SESSION_TOKEN"] = "testing"
 os.environ["AWS_EC2_METADATA_DISABLED"] = "true"
+
+os.environ["API_ACCOUNT_IDS"] = "123456789012"
+os.environ["SOURCE_ACCOUNT_IDS"] = "123456789012"

@@ -62,8 +62,15 @@ def test_publish_correlate_route_transform_email_and_feedback(signal, aws_tables
         patches.enter_context(patch.object(correlator, "sfn_client", workflow))
         patches.enter_context(patch.object(email_sender, "ses", ses))
         patches.enter_context(patch.object(content_transformer, "transform_for_persona", return_value="A <script>alert(1)</script>"))
-        response = publish_handler.handler({"body": json.dumps(signal.to_event())}, None)
+        request = {k: v for k, v in signal.to_event().items() if k in ('source', 'signal_type', 'severity', 'content', 'context', 'audience_hint', 'correlation')}
+        response = publish_handler.handler({"requestContext": {"identity": {"accountId": "123456789012"}}, "body": json.dumps(request)}, None)
         assert response["statusCode"] == 201
+        from src.ingestion import outbox
+        from boto3.dynamodb.types import TypeSerializer
+        row = tables['signals'].scan()['Items'][0]
+        with patch.object(outbox, 'kinesis', stream):
+            result = outbox.handler({'Records': [{'eventName': 'INSERT', 'dynamodb': {'SequenceNumber': '1', 'NewImage': {k: TypeSerializer().serialize(v) for k, v in row.items()}}}]}, None)
+        assert result['batchItemFailures'] == []
         wire = json.loads(stream.put_record.call_args.kwargs["Data"])
         row = tables["signals"].get_item(Key={"signalId": wire["signal_id"], "ingestedAt": wire["ingested_at"]})["Item"]
         assert row["content"]["structured_data"]["fraction"] == Decimal("0.75")
@@ -101,7 +108,7 @@ def test_publish_correlate_route_transform_email_and_feedback(signal, aws_tables
 def test_publish_invalid_payload_is_client_error(body):
     from src.ingestion import publish_handler
     with patch.object(publish_handler, "kinesis") as stream:
-        assert publish_handler.handler({"body": body}, None)["statusCode"] == 400
+        assert publish_handler.handler({"requestContext": {"identity": {"accountId": "123456789012"}}, "body": body}, None)["statusCode"] == 400
         stream.put_record.assert_not_called()
 
 
@@ -110,7 +117,8 @@ def test_prediction_decimal_storage_and_json_stream(signal, aws_tables):
     _, tables = aws_tables
     with patch.object(predictor, "kinesis") as stream:
         predictor._publish_prediction(signal, "signals", tables["signals"])
-    assert json.loads(stream.put_record.call_args.kwargs["Data"])["content"]["structured_data"]["fraction"] == 0.75
+    assert tables["signals"].scan()["Items"][0]["content"]["structured_data"]["fraction"] == Decimal("0.75")
+    stream.put_record.assert_not_called()
     assert tables["signals"].scan()["Count"] == 1
 
 
@@ -120,18 +128,19 @@ def test_native_securityhub_keeps_all_findings(aws_tables):
     with patch.object(org_forwarder, "dynamodb", ddb), patch.object(org_forwarder, "kinesis") as stream:
         result = org_forwarder.handler({"source": "aws.securityhub", "account": "123456789012", "region": "us-east-1",
             "detail": {"findings": [{"Title": title, "Severity": {"Label": "HIGH"}, "Resources": []} for title in ["One", "Two"]]}}, None)
-    assert len(result["signalIds"]) == 2 and stream.put_record.call_count == 2
+    assert len(result["signalIds"]) == 2 and stream.put_record.call_count == 0
     assert tables["signals"].scan()["Count"] == 2
 
 
 def test_cloudwatch_alarm_preserves_state_and_top_level_arn(aws_tables):
     from src.ingestion import org_forwarder
-    ddb, _ = aws_tables
+    ddb, tables = aws_tables
     with patch.object(org_forwarder, "dynamodb", ddb), patch.object(org_forwarder, "kinesis") as stream:
         org_forwarder.handler({"source": "aws.cloudwatch", "detail-type": "CloudWatch Alarm State Change",
             "resources": ["arn:aws:cloudwatch:us-east-1:123456789012:alarm:cpu"],
             "detail": {"alarmName": "cpu", "state": {"value": "OK", "reason": "Recovered"}}}, None)
-    wire = json.loads(stream.put_record.call_args.kwargs["Data"])
+    stream.put_record.assert_not_called()
+    wire = tables["signals"].scan()["Items"][0]
     assert wire["severity"]["level"] == "informational"
     assert wire["signal_type"] == "lifecycle"
     assert wire["context"]["resource_arns"][0].endswith(":cpu")
@@ -187,7 +196,7 @@ def test_learned_rule_persists_with_dynamodb_numeric_types(aws_tables):
     tables["personas"].put_item(Item={"personaId": "persona-sre"})
     _create_suppression_rule(tables["personas"], "persona-sre", "datadog", 3)
     persona = tables["personas"].get_item(Key={"personaId": "persona-sre"})["Item"]
-    assert persona["suppressionRules"][0]["confidence"] == Decimal("0.5")
+    assert next(iter(persona["learnedSuppressions"].values()))["confidence"] == Decimal("0.5")
     assert should_suppress({"source": "datadog", "severity": {"level": "low"}}, persona)
 
 

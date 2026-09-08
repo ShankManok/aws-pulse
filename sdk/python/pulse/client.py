@@ -3,7 +3,8 @@ from __future__ import annotations
 
 import json
 import time
-from urllib.parse import urlencode
+import uuid
+from urllib.parse import urlencode, quote
 from typing import Any, Optional
 
 import botocore.auth
@@ -126,6 +127,8 @@ class PulseClient:
         if not endpoint_url:
             raise ValueError("endpoint_url is required")
 
+        if max_retries < 0 or timeout <= 0:
+            raise ValueError("max_retries must be nonnegative and timeout positive")
         self._api_key = api_key
         self._endpoint = endpoint_url.rstrip("/")
         self._region = region
@@ -145,6 +148,7 @@ class PulseClient:
         context: Optional[dict] = None,
         audience_hint: Optional[dict] = None,
         correlation: Optional[dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> PublishSignalResponse:
         """Publish a signal to AWS Pulse.
 
@@ -178,7 +182,7 @@ class PulseClient:
         if correlation:
             payload["correlation"] = correlation
 
-        response = self._request("POST", "/v1/signals", body=payload)
+        response = self._request("POST", "/v1/signals", body=payload, idempotency_key=idempotency_key or str(uuid.uuid4()))
         return PublishSignalResponse.model_validate(response)
 
     def get_signal(self, signal_id: str) -> SignalResponse:
@@ -193,7 +197,7 @@ class PulseClient:
         Raises:
             PulseNotFoundError: If signal doesn't exist
         """
-        response = self._request("GET", f"/v1/signals/{signal_id}")
+        response = self._request("GET", f"/v1/signals/{quote(signal_id, safe='')}")
         return SignalResponse.model_validate(response)
 
     def create_persona(
@@ -241,7 +245,7 @@ class PulseClient:
         Returns:
             PersonaResponse confirming the update
         """
-        response = self._request("PUT", f"/v1/personas/{persona_id}", body=updates)
+        response = self._request("PUT", f"/v1/personas/{quote(persona_id, safe='')}", body=updates)
         return PersonaResponse.model_validate(response)
 
     def list_deliveries(
@@ -283,13 +287,20 @@ class PulseClient:
         Returns:
             Confirmation dict with deliveryId and action
         """
-        if feedback not in ("useful", "noise", "escalate"):
-            raise PulseValidationError(f"Invalid feedback: {feedback}. Must be useful, noise, or escalate")
+        if feedback not in ("useful", "noise", "escalate", "resolved"):
+            raise PulseValidationError(f"Invalid feedback: {feedback}. Must be useful, noise, escalate, or resolved")
 
         return self._request("POST", "/v1/feedback", body={
             "deliveryId": delivery_id,
             "feedback": feedback,
         })
+
+    def subscribe(self, persona_id: str, natural_language: str) -> dict:
+        return self._request("POST", f"/v1/personas/{quote(persona_id, safe='')}/subscribe",
+                             body={"naturalLanguage": natural_language})
+
+    def get_nrs(self) -> dict:
+        return self._request("GET", "/v1/analytics/nrs")
 
     # --- Private Methods ---
 
@@ -299,18 +310,19 @@ class PulseClient:
         path: str,
         body: Optional[dict] = None,
         params: Optional[dict] = None,
+        idempotency_key: Optional[str] = None,
     ) -> dict:
         """Make an authenticated API request with retries."""
         url = f"{self._endpoint}{path}"
         headers = {"Content-Type": "application/json"}
         if self._api_key:
             headers["x-api-key"] = self._api_key
-        body_str = json.dumps(body) if body else ""
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        body_str = json.dumps(body, allow_nan=False) if body else ""
 
         if params:
             url += "?" + urlencode(params)
-
-        last_error: Optional[Exception] = None
 
         for attempt in range(self._max_retries + 1):
             try:
@@ -345,14 +357,12 @@ class PulseClient:
                 return self._handle_response(response)
 
             except (requests.ConnectionError, requests.Timeout) as e:
-                last_error = e
                 if attempt < self._max_retries:
                     wait = 2 ** attempt
                     time.sleep(wait)
                     continue
                 raise PulseError(f"Connection failed after {self._max_retries} retries: {e}")
 
-        raise PulseError(f"Request failed: {last_error}")
 
     def _handle_response(self, response: requests.Response) -> dict:
         """Parse response and raise appropriate exceptions."""

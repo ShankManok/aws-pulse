@@ -26,7 +26,8 @@ jobs:
       - name: Install & Deploy
         run: |
           pip install -r requirements.txt -r requirements-dev.txt
-          pytest tests/unit/ tests/integration/ -q
+          pytest tests/unit/ tests/integration/ -q --cov=src --cov=sdk/python/pulse --cov-fail-under=100
           npm ci
           npm test
+          python scripts/package_smoke.py infra/cdk.out
           cd infra && npx cdk deploy --all --context stage=dev --require-approval never

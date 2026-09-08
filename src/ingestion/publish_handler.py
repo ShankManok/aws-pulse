@@ -1,60 +1,30 @@
-"""Publish API Lambda handler - ingests signals into Pulse."""
-import json
+"""Publish API with authenticated organization binding and transactional outbox."""
 import os
 import boto3
-import structlog
-from shared.models import SignalEvent
 from pydantic import ValidationError
+from shared.models import SignalEvent
+from shared.runtime import authorize, body, response
+from shared.ingest import persist
 
-logger = structlog.get_logger()
-kinesis = boto3.client("kinesis")
-dynamodb = boto3.resource("dynamodb")
+kinesis = boto3.client('kinesis')
+dynamodb = boto3.resource('dynamodb')
 
 
 def handler(event, context):
-    """Handle POST /v1/signals requests."""
     try:
-        body = json.loads(event.get("body", "{}"))
-
-        if not isinstance(body, dict):
-            return {"statusCode": 400, "body": json.dumps({"error": "Expected a JSON object"})}
-
-        # Validate and create signal event
-        signal = SignalEvent(
-            source=body["source"],
-            signal_type=body["signal_type"],
-            severity=body["severity"],
-            content=body["content"],
-            context=body.get("context", {}),
-            audience_hint=body.get("audience_hint", {}),
-            correlation=body.get("correlation", {}),
-        )
-
-        # Write to DynamoDB for persistence
-        table = dynamodb.Table(os.environ["SIGNAL_TABLE_NAME"])
-        table.put_item(Item=signal.to_dynamo())
-
-        # Write to Kinesis for processing pipeline
-        kinesis.put_record(
-            StreamName=os.environ["SIGNAL_STREAM_NAME"],
-            Data=json.dumps(signal.to_event()),
-            PartitionKey=signal.context.account_id or signal.signal_id,
-        )
-
-        logger.info("signal_ingested", signal_id=signal.signal_id, source=signal.source)
-
-        return {
-            "statusCode": 201,
-            "body": json.dumps({
-                "signalId": signal.signal_id,
-                "status": signal.status.value,
-            }),
-        }
-
-    except (json.JSONDecodeError, ValidationError, TypeError, ValueError):
-        return {"statusCode": 400, "body": json.dumps({"error": "Invalid signal payload"})}
-    except KeyError as e:
-        return {"statusCode": 400, "body": json.dumps({"error": f"Missing field: {e}"})}
-    except Exception as e:
-        logger.error("publish_failed", error=str(e))
-        return {"statusCode": 500, "body": json.dumps({"error": "Internal error"})}
+        org = authorize(event)
+        data = body(event)
+        allowed = {'source', 'signal_type', 'severity', 'content', 'context', 'audience_hint', 'correlation'}
+        if set(data) - allowed:
+            raise ValueError('Unknown signal fields')
+        signal = SignalEvent(**data, org_id=org)
+        source_accounts = os.environ.get('SOURCE_ACCOUNT_IDS', '').split(',')
+        if signal.context.account_id and signal.context.account_id not in source_accounts:
+            raise PermissionError('Signal account is outside this organization deployment')
+        headers = {k.lower(): v for k, v in (event.get('headers') or {}).items()}
+        sid = persist(signal, dynamodb.Table(os.environ['SIGNAL_TABLE_NAME']), headers.get('idempotency-key'))
+        return response(201, {'signalId': sid, 'status': 'new'})
+    except PermissionError as exc:
+        return response(403, {'error': str(exc)})
+    except (ValueError, KeyError, TypeError, ValidationError) as exc:
+        return response(400, {'error': str(exc)})

@@ -2,11 +2,11 @@ SHELL := /bin/bash
 .PHONY: install test lint deploy clean
 
 install:
-	cd infra && npm install
+	npm ci
 	pip install -r requirements.txt -r requirements-dev.txt
 
 test:
-	pytest tests/unit/ -v --cov=src --cov-report=term-missing
+	pytest tests/unit/ tests/integration/ -v --cov=src --cov=sdk/python/pulse --cov-report=term-missing --cov-fail-under=100
 
 test-integration:
 	pytest tests/integration/ -v
@@ -16,7 +16,7 @@ test-e2e:
 	@exit 1
 
 lint:
-	ruff check src/ tests/
+	ruff check src/ tests/ sdk/python/ scripts/
 	npm run build --workspace infra
 
 format:

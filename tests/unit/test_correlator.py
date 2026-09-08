@@ -87,7 +87,7 @@ class TestCorrelator:
 
         assert result["batchItemFailures"] == []
         # Should have attempted to create or join a correlation group
-        mock_dynamodb.get_item.assert_called()
+        mock_dynamodb.update_item.assert_called()
 
     def test_workflow_triggered_when_arn_set(self, mock_dynamodb, mock_sfn):
         """When PERSONA_WORKFLOW_ARN is set, should start the workflow."""

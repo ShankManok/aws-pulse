@@ -4,11 +4,13 @@ When a delivery record's feedback field is updated (useful/noise/escalate),
 aggregates per-persona suppression patterns and updates suppression rules.
 """
 from decimal import Decimal
+import hashlib
 import os
 from datetime import datetime, timedelta
 import boto3
 import structlog
 from shared.config import Config
+from shared.runtime import items
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -63,7 +65,7 @@ def handler(event, context):
             _publish_feedback_metric(persona_id, new_feedback)
 
             # If feedback is "noise", check if we should create a suppression rule
-            if new_feedback == "noise":
+            if new_feedback in ("noise", "useful"):
                 _check_noise_suppression(
                     delivery_table=delivery_table,
                     persona_table=persona_table,
@@ -99,65 +101,67 @@ def _check_noise_suppression(
     window_start = (datetime.utcnow() - timedelta(days=WINDOW_DAYS)).isoformat() + "Z"
 
     try:
-        response = delivery_table.query(
+        noise_items = items(delivery_table, "query",
             IndexName="by-persona",
             KeyConditionExpression="personaId = :pid AND deliveredAt > :start",
-            FilterExpression="feedback = :noise",
+            FilterExpression="feedback = :noise OR feedback = :useful",
             ExpressionAttributeValues={
                 ":pid": persona_id,
                 ":start": window_start,
                 ":noise": "noise",
+                ":useful": "useful",
             },
             Limit=100,
         )
 
-        noise_items = response.get("Items", [])
 
-        # Count noise separately for each concrete source.
-        source_counts: dict[str, int] = {}
+        # Count distinct incidents. A useful response overrides noise on another recipient.
+        evidence = {}
         for item in noise_items:
-            source_key = item.get("signalSource", "")
-            if not source_key or source_key == "all":
+            source, sid = item.get('signalSource'), item.get('signalId')
+            if not source or source == 'all' or not sid:
                 continue
-            source_counts[source_key] = source_counts.get(source_key, 0) + 1
-
-        # Check threshold
-        for source_key, count in source_counts.items():
-            if count >= NOISE_THRESHOLD:
-                _create_suppression_rule(
-                    persona_table=persona_table,
-                    persona_id=persona_id,
-                    source_key=source_key,
-                    noise_count=count,
-                )
+            key = (source, sid)
+            useful = item.get('feedback') == 'useful'
+            evidence[key] = evidence.get(key, False) or useful
+        for source in {source for source, _ in evidence}:
+            votes = [useful for (key, _), useful in evidence.items() if key == source]
+            noise_count = sum(not useful for useful in votes)
+            confidence = noise_count / len(votes)
+            if noise_count >= NOISE_THRESHOLD and confidence >= .8:
+                _create_suppression_rule(persona_table, persona_id, source, noise_count, confidence)
+            else:
+                persona_table.update_item(Key={'personaId': persona_id},
+                    UpdateExpression='REMOVE learnedSuppressions.#id',
+                    ExpressionAttributeNames={'#id': hashlib.sha256(source.encode()).hexdigest()})
 
     except Exception as e:
         logger.warning("noise_check_failed", persona_id=persona_id, error=str(e))
+        raise
 
 
-def _create_suppression_rule(persona_table, persona_id: str, source_key: str, noise_count: int):
-    """Add a learned suppression rule to the persona's suppressionRules array."""
+def _create_suppression_rule(persona_table, persona_id: str, source_key: str, noise_count: int, confidence: float = None):
+    """Replace one learned source rule without appending duplicate entries."""
     now = datetime.utcnow().isoformat() + "Z"
-    rule_id = f"learned-{source_key}-{int(datetime.utcnow().timestamp())}"
+    rule_id = hashlib.sha256(source_key.encode()).hexdigest()
 
     new_rule = {
         "id": rule_id,
         "source": "learned",
         "pattern": {"source_key": source_key, "noise_count": noise_count},
-        "confidence": Decimal(str(min(noise_count / (NOISE_THRESHOLD * 2), 1.0))),
+        "confidence": Decimal(str(confidence if confidence is not None else min(noise_count / (NOISE_THRESHOLD * 2), 1.0))),
         "createdAt": now,
         "expiresAt": (datetime.utcnow() + timedelta(days=WINDOW_DAYS)).isoformat() + "Z",
     }
 
     try:
-        persona_table.update_item(
-            Key={"personaId": persona_id},
-            UpdateExpression="SET suppressionRules = list_append(if_not_exists(suppressionRules, :empty), :rule)",
-            ExpressionAttributeValues={
-                ":rule": [new_rule],
-                ":empty": [],
-            },
-        )
+        persona_table.update_item(Key={'personaId': persona_id},
+            UpdateExpression='SET learnedSuppressions = if_not_exists(learnedSuppressions, :empty)',
+            ConditionExpression='attribute_exists(personaId)', ExpressionAttributeValues={':empty': {}})
+        persona_table.update_item(Key={'personaId': persona_id},
+            UpdateExpression='SET learnedSuppressions.#id = :rule',
+            ConditionExpression='attribute_exists(personaId)',
+            ExpressionAttributeNames={'#id': rule_id}, ExpressionAttributeValues={':rule': new_rule})
         logger.info(
             "suppression_rule_created",
             persona_id=persona_id,
@@ -166,6 +170,7 @@ def _create_suppression_rule(persona_table, persona_id: str, source_key: str, no
         )
     except Exception as e:
         logger.error("suppression_rule_creation_failed", persona_id=persona_id, error=str(e))
+        raise
 
 
 def _publish_feedback_metric(persona_id: str, feedback: str):

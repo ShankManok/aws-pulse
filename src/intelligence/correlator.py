@@ -3,10 +3,11 @@ import hashlib
 import json
 import os
 import base64
-from datetime import datetime, timedelta
+from datetime import datetime
 import boto3
 import structlog
 from shared.config import Config
+from shared.runtime import parse_time, owns, tenant
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -34,6 +35,8 @@ def handler(event, context):
             payload_raw = base64.b64decode(record["kinesis"]["data"])
             signal_data = json.loads(payload_raw)
             signal_id = signal_data.get("signal_id", "unknown")
+            if not owns(signal_data):
+                raise PermissionError("Organization mismatch")
 
             logger.info("processing_signal", signal_id=signal_id, source=signal_data.get("source"))
 
@@ -98,74 +101,16 @@ def _find_or_create_correlation_group(
     resource_arns: list[str],
     time_window_seconds: int,
 ) -> str:
-    """Find an existing active correlation group for the same resources, or create one.
-
-    MVP approach: use first resource ARN as a simple hash key for grouping.
-    Full implementation would do overlap detection across all ARNs.
-    """
-    import hashlib
-
-    # Create a deterministic group key from sorted resource ARNs
-    arns_key = "|".join(sorted(resource_arns))
-    group_hash = hashlib.sha256(arns_key.encode()).hexdigest()[:16]
-
-    now = datetime.utcnow()
-    window_start = now - timedelta(seconds=time_window_seconds)
-
-    # Try to find an active group with this hash
-    group_id = f"cg-{group_hash}"
-
-    try:
-        response = correlation_table.get_item(Key={"groupId": group_id})
-        existing = response.get("Item")
-
-        if existing and existing.get("status") == "active":
-            # Check if within time window
-            group_created = existing.get("createdAt", "")
-            if group_created:
-                created_dt = datetime.fromisoformat(group_created.rstrip("Z"))
-                if created_dt >= window_start:
-                    # Add signal to existing group
-                    signals = existing.get("signals", [])
-                    if signal_id not in signals:
-                        signals.append(signal_id)
-                        correlation_table.update_item(
-                            Key={"groupId": group_id},
-                            UpdateExpression="SET signals = :signals, updatedAt = :now",
-                            ExpressionAttributeValues={
-                                ":signals": signals,
-                                ":now": now.isoformat() + "Z",
-                            },
-                        )
-                    logger.info("signal_correlated", signal_id=signal_id, group_id=group_id)
-                    return group_id
-
-    except Exception as e:
-        logger.warning("correlation_lookup_failed", error=str(e))
-
-    # Create new correlation group
-    severity = signal_data.get("severity", {})
-    context = signal_data.get("context", {})
-
-    correlation_table.put_item(Item={
-        "groupId": group_id,
-        "signals": [signal_id],
-        "rootSignalId": signal_id,
-        "timeWindow": {
-            "start": window_start.isoformat() + "Z",
-            "end": (now + timedelta(seconds=time_window_seconds)).isoformat() + "Z",
-        },
-        "servicesAffected": severity.get("blast_radius", {}).get("services", []),
-        "accountsAffected": [context.get("account_id", "")] if context.get("account_id") else [],
-        "unifiedSeverity": severity,
-        "status": "active",
-        "createdAt": now.isoformat() + "Z",
-        "updatedAt": now.isoformat() + "Z",
-        # TTL: expire after 24 hours
-        "ttl": int((now + timedelta(hours=24)).timestamp()),
-    })
-
-    logger.info("correlation_group_created", group_id=group_id, signal_id=signal_id)
+    """Atomically group equal resource sets in deterministic event-time windows."""
+    ingested = signal_data.get('ingested_at') or datetime.utcnow().isoformat() + 'Z'
+    bucket = int(parse_time(ingested).timestamp()) // time_window_seconds
+    key = f"{tenant()}:{bucket}:" + '|'.join(sorted(set(resource_arns)))
+    group_id = 'cg-' + hashlib.sha256(key.encode()).hexdigest()[:32]
+    correlation_table.update_item(Key={'groupId': group_id},
+        UpdateExpression='SET rootSignalId = if_not_exists(rootSignalId, :root), #status = :active, orgId = :org, createdAt = if_not_exists(createdAt, :now), updatedAt = :now, #ttl = :ttl ADD signals :signals, resourceSet :resources',
+        ExpressionAttributeNames={'#status': 'status', '#ttl': 'ttl'},
+        ExpressionAttributeValues={':root': signal_id, ':active': 'active', ':org': tenant(), ':now': ingested,
+                                   ':ttl': (bucket + 1) * time_window_seconds + 86400, ':signals': {signal_id}, ':resources': set(resource_arns)})
     return group_id
 
 

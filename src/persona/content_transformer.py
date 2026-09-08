@@ -4,6 +4,7 @@ import boto3
 import structlog
 from shared.bedrock_client import transform_for_persona
 from shared.config import Config
+from shared.runtime import owns
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -57,8 +58,8 @@ def handler(event, context):
         logger.error("missing_signal_data")
         return {"signal": signal_data, "transformations": []}
 
-    # Check if this is an escalation (don't re-escalate)
-    is_escalation = signal_data.get("_escalation", False)
+    if not owns(signal_data):
+        raise PermissionError('Organization mismatch')
 
     persona_table = dynamodb.Table(os.environ.get("PERSONA_TABLE_NAME", Config.PERSONA_TABLE_NAME))
     results = []
@@ -73,7 +74,7 @@ def handler(event, context):
             response = persona_table.get_item(Key={"personaId": persona_id})
             persona_config = response.get("Item")
 
-            if not persona_config:
+            if not persona_config or not owns(persona_config):
                 logger.warning("persona_not_found", persona_id=persona_id)
                 continue
 
@@ -88,7 +89,11 @@ def handler(event, context):
 
             # Extract delivery preferences
             delivery_prefs = persona_config.get("deliveryPreferences", {})
-            channels = delivery_prefs.get("channels", ["email"])
+            channels = list(dict.fromkeys(delivery_prefs.get("channels", ["email"])))
+            if any(channel not in ('email', 'slack') for channel in channels):
+                raise ValueError('Unsupported delivery channel')
+            if delivery_prefs.get('cadence', 'realtime') != 'realtime' or delivery_prefs.get('quietHours'):
+                raise ValueError('Deferred delivery is not configured')
             escalation_minutes = int(delivery_prefs.get("escalationAfterMinutes", 0))
 
             # Extract recipients from persona members
@@ -109,7 +114,7 @@ def handler(event, context):
                 }
 
                 # Add escalation metadata (only for non-escalation deliveries)
-                if not is_escalation and escalation_minutes > 0:
+                if escalation_minutes > 0 and escalation_chain:
                     entry["escalation_after_minutes"] = escalation_minutes
                     entry["escalation_chain"] = escalation_chain
 

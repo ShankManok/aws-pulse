@@ -6,6 +6,9 @@ import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
+import * as sources from 'aws-cdk-lib/aws-lambda-event-sources';
+import * as sqs from 'aws-cdk-lib/aws-sqs';
+import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import { Construct } from 'constructs';
 
 export interface IngestionStackProps extends cdk.StackProps {
@@ -35,6 +38,7 @@ export class IngestionStack extends cdk.Stack {
       sortKey: { name: 'ingestedAt', type: dynamodb.AttributeType.STRING },
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       timeToLiveAttribute: 'ttl',
+      stream: dynamodb.StreamViewType.NEW_IMAGE,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
@@ -82,8 +86,26 @@ export class IngestionStack extends cdk.Stack {
       },
     });
 
-    this.signalStream.grantWrite(publishHandler);
-    this.signalTable.grantWriteData(publishHandler);
+
+    this.signalTable.grantReadWriteData(publishHandler);
+
+    publishHandler.addEnvironment('API_ACCOUNT_IDS', this.account);
+    publishHandler.addEnvironment('SOURCE_ACCOUNT_IDS', this.account);
+    const outbox = new lambda.Function(this, 'SignalOutbox', {
+      functionName: `pulse-outbox-${props.stage}`, runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'outbox.handler', code: lambda.Code.fromAsset('../src/ingestion'),
+      layers: [sharedLayer], timeout: cdk.Duration.seconds(30),
+      environment: { SIGNAL_STREAM_NAME: this.signalStream.streamName },
+    });
+    const outboxFailures = new sqs.Queue(this, 'OutboxFailures', {
+      retentionPeriod: cdk.Duration.days(14), encryption: sqs.QueueEncryption.SQS_MANAGED,
+    });
+    this.signalStream.grantWrite(outbox);
+    outbox.addEventSource(new sources.DynamoEventSource(this.signalTable, {
+      startingPosition: lambda.StartingPosition.TRIM_HORIZON,
+      batchSize: 100, reportBatchItemFailures: true, bisectBatchOnError: true,
+      retryAttempts: 10, onFailure: new sources.SqsDlq(outboxFailures),
+    }));
 
     // --- API Gateway with rate limiting ---
     const api = new apigateway.RestApi(this, 'PublishApi', {
@@ -123,6 +145,43 @@ export class IngestionStack extends cdk.Stack {
       authorizationType: apigateway.AuthorizationType.IAM,
     });
 
+    const management = new lambda.Function(this, 'ManagementApi', {
+      functionName: `pulse-management-${props.stage}`, runtime: lambda.Runtime.PYTHON_3_12,
+      handler: 'management.handler', code: lambda.Code.fromAsset('../src/api'),
+      layers: [sharedLayer], timeout: cdk.Duration.seconds(30),
+      environment: {
+        API_ACCOUNT_IDS: this.account,
+        SIGNAL_TABLE_NAME: this.signalTable.tableName,
+        PERSONA_TABLE_NAME: `pulse-personas-${props.stage}`,
+        DELIVERY_TABLE_NAME: `pulse-delivery-${props.stage}`,
+        ANALYTICS_TABLE_NAME: `pulse-analytics-${props.stage}`,
+        ACTION_FUNCTION_NAME: `pulse-action-callback-${props.stage}`,
+        SUBSCRIPTION_FUNCTION_NAME: `pulse-subscription-agent-${props.stage}`,
+      },
+    });
+    this.signalTable.grantReadData(management);
+    for (const name of ['personas', 'delivery', 'analytics']) {
+      const arn = this.formatArn({ service: 'dynamodb', resource: 'table', resourceName: `pulse-${name}-${props.stage}` });
+      management.addToRolePolicy(new iam.PolicyStatement({
+        actions: name === 'personas' ? ['dynamodb:GetItem', 'dynamodb:PutItem'] : ['dynamodb:GetItem', 'dynamodb:Query', 'dynamodb:Scan'],
+        resources: [arn, `${arn}/index/*`],
+      }));
+    }
+    management.addToRolePolicy(new iam.PolicyStatement({ actions: ['lambda:InvokeFunction'],
+      resources: ['action-callback', 'subscription-agent'].map(name => this.formatArn({ service: 'lambda', resource: 'function', resourceName: `pulse-${name}-${props.stage}`, arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME })),
+    }));
+    const managementIntegration = new apigateway.LambdaIntegration(management);
+    const protectedMethod = { authorizationType: apigateway.AuthorizationType.IAM, apiKeyRequired: true };
+    const personas = v1.addResource('personas');
+    personas.addMethod('POST', managementIntegration, protectedMethod);
+    const personaId = personas.addResource('{personaId}');
+    personaId.addMethod('PUT', managementIntegration, protectedMethod);
+    personaId.addResource('subscribe').addMethod('POST', managementIntegration, protectedMethod);
+    signals.addResource('{signalId}').addMethod('GET', managementIntegration, protectedMethod);
+    v1.addResource('deliveries').addMethod('GET', managementIntegration, protectedMethod);
+    v1.addResource('feedback').addMethod('POST', managementIntegration, protectedMethod);
+    v1.addResource('analytics').addResource('nrs').addMethod('GET', managementIntegration, protectedMethod);
+
     // ===== Webhook Adapters =====
 
     const pagerdutyAdapter = new lambda.Function(this, 'PagerDutyAdapter', {
@@ -140,8 +199,8 @@ export class IngestionStack extends cdk.Stack {
         STAGE: props.stage,
       },
     });
-    this.signalStream.grantWrite(pagerdutyAdapter);
-    this.signalTable.grantWriteData(pagerdutyAdapter);
+
+    this.signalTable.grantReadWriteData(pagerdutyAdapter);
 
     const datadogAdapter = new lambda.Function(this, 'DatadogAdapter', {
       functionName: `pulse-webhook-datadog-${props.stage}`,
@@ -158,8 +217,8 @@ export class IngestionStack extends cdk.Stack {
         STAGE: props.stage,
       },
     });
-    this.signalStream.grantWrite(datadogAdapter);
-    this.signalTable.grantWriteData(datadogAdapter);
+
+    this.signalTable.grantReadWriteData(datadogAdapter);
 
     const servicenowAdapter = new lambda.Function(this, 'ServiceNowAdapter', {
       functionName: `pulse-webhook-servicenow-${props.stage}`,
@@ -177,8 +236,8 @@ export class IngestionStack extends cdk.Stack {
         STAGE: props.stage,
       },
     });
-    this.signalStream.grantWrite(servicenowAdapter);
-    this.signalTable.grantWriteData(servicenowAdapter);
+
+    this.signalTable.grantReadWriteData(servicenowAdapter);
 
     // --- Org Forwarder Lambda (processes cross-account events) ---
     const orgForwarder = new lambda.Function(this, 'OrgForwarder', {
@@ -196,8 +255,8 @@ export class IngestionStack extends cdk.Stack {
         STAGE: props.stage,
       },
     });
-    this.signalStream.grantWrite(orgForwarder);
-    this.signalTable.grantWriteData(orgForwarder);
+
+    this.signalTable.grantReadWriteData(orgForwarder);
 
     // One route for local and forwarded events; prevents duplicate raw/normalized records.
     new events.Rule(this, 'NativeEventRule', {
@@ -219,6 +278,16 @@ export class IngestionStack extends cdk.Stack {
         condition: { type: 'StringEquals', key: 'aws:PrincipalOrgID', value: props.organizationId },
       });
     }
+
+    const webhookSecret = new secretsmanager.Secret(this, 'WebhookCredentials', {
+      secretStringValue: cdk.SecretValue.unsafePlainText('{}'),
+      description: 'Set provider credentials before enabling webhook senders',
+    });
+    for (const adapter of [pagerdutyAdapter, datadogAdapter, servicenowAdapter]) {
+      adapter.addEnvironment('WEBHOOK_SECRET_ARN', webhookSecret.secretArn);
+      webhookSecret.grantRead(adapter);
+    }
+    new cdk.CfnOutput(this, 'WebhookSecretArn', { value: webhookSecret.secretArn });
 
     // Webhook API endpoints
     const webhooks = v1.addResource('webhooks');

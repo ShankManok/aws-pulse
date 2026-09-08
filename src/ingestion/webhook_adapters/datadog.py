@@ -2,6 +2,10 @@
 import hmac
 import json
 import os
+from shared.ingest import persist
+from shared.webhooks import secret
+from shared.runtime import body as decode_body
+import hashlib
 import boto3
 import structlog
 from shared.models import SignalEvent, SignalContent, Severity, SeverityLevel, SignalContext, AudienceHint
@@ -33,8 +37,7 @@ def handler(event, context):
 
     Validates DD-API-KEY header and normalizes to SignalEvent.
     """
-    headers = event.get("headers", {})
-    body = event.get("body", "")
+    headers = {key.lower(): value for key, value in (event.get("headers") or {}).items()}
 
     # Validate API key
     api_key = headers.get("DD-API-KEY") or headers.get("dd-api-key", "")
@@ -43,41 +46,33 @@ def handler(event, context):
         return {"statusCode": 401, "body": json.dumps({"error": "Invalid API key"})}
 
     try:
-        payload = json.loads(body)
-    except (json.JSONDecodeError, TypeError):
+        payload = decode_body(event)
+    except (ValueError, TypeError, UnicodeDecodeError):
         return {"statusCode": 400, "body": json.dumps({"error": "Invalid JSON body"})}
 
     # Normalize to SignalEvent
-    signal = _normalize_alert(payload)
+    try:
+        signal = _normalize_alert(payload)
+    except (ValueError, TypeError, AttributeError):
+        return {"statusCode": 400, "body": json.dumps({"error": "Invalid provider payload"})}
 
-    # Write to Kinesis + DynamoDB
-    stream_name = os.environ.get("SIGNAL_STREAM_NAME", "")
+    # Persist atomically; the DynamoDB outbox forwards to Kinesis
     table_name = os.environ.get("SIGNAL_TABLE_NAME", "")
 
-    signal_dict = signal.to_event()
-
-    if table_name:
-        table = dynamodb.Table(table_name)
-        table.put_item(Item=signal.to_dynamo())
-
-    if stream_name:
-        kinesis.put_record(
-            StreamName=stream_name,
-            Data=json.dumps(signal_dict),
-            PartitionKey=signal.context.account_id or signal.signal_id,
-        )
+    key = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    sid = persist(signal, dynamodb.Table(table_name), f"datadog:{key}" if key else None)
 
     logger.info("datadog_signal_ingested", signal_id=signal.signal_id, alert_type=payload.get("alert_type"))
 
     return {
         "statusCode": 201,
-        "body": json.dumps({"signalId": signal.signal_id, "status": "new"}),
+        "body": json.dumps({"signalId": sid, "status": "new"}),
     }
 
 
 def _validate_api_key(api_key: str) -> bool:
     """Validate Datadog webhook API key."""
-    expected_key = os.environ.get("DATADOG_WEBHOOK_API_KEY", "")
+    expected_key = secret("DATADOG_WEBHOOK_API_KEY")
     if not expected_key:
         logger.warning("datadog_no_api_key_configured")
         return False

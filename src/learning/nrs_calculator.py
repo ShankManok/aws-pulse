@@ -13,6 +13,7 @@ from decimal import Decimal
 import boto3
 import structlog
 from shared.config import Config
+from shared.runtime import pages, parse_time
 
 logger = structlog.get_logger()
 dynamodb = boto3.resource("dynamodb")
@@ -29,7 +30,7 @@ def handler(event, context):
     delivery_table = dynamodb.Table(os.environ.get("DELIVERY_TABLE_NAME", Config.DELIVERY_TABLE_NAME))
     analytics_table = dynamodb.Table(os.environ.get("ANALYTICS_TABLE_NAME", f"pulse-analytics-{stage}"))
 
-    now = datetime.utcnow()
+    now = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
     window_end = now.isoformat() + "Z"
     window_start = (now - timedelta(hours=24)).isoformat() + "Z"
 
@@ -38,9 +39,9 @@ def handler(event, context):
     logger.info("nrs_calculation_start", window_start=window_start, window_end=window_end)
 
     # --- Compute signal counts ---
-    total_ingested = _count_signals_by_status(signal_table, window_start, None)
-    signals_suppressed = _count_signals_by_status(signal_table, window_start, "suppressed")
-    signals_deduplicated = _count_signals_by_status(signal_table, window_start, "correlated")
+    total_ingested = _count_signals_by_status(signal_table, window_start, None, window_end)
+    signals_suppressed = _count_signals_by_status(signal_table, window_start, "suppressed", window_end)
+    signals_deduplicated = _count_signals_by_status(signal_table, window_start, "deduplicated", window_end)
 
     # --- Compute NRS ---
     nrs = 0.0
@@ -48,16 +49,16 @@ def handler(event, context):
         nrs = ((signals_suppressed + signals_deduplicated) / total_ingested) * 100
 
     # --- Compute MTTA ---
-    mtta_seconds = _compute_mtta(delivery_table, window_start)
+    mtta_seconds = _compute_mtta(delivery_table, window_start, window_end)
 
     # --- Publish to CloudWatch ---
     _publish_metrics(org_id, stage, nrs, mtta_seconds, total_ingested, signals_suppressed)
 
     # --- Store daily snapshot ---
     snapshot = {
-        "snapshotId": f"{org_id}#{now.strftime('%Y-%m-%d')}",
+        "snapshotId": f"{org_id}#{(now - timedelta(days=1)).strftime('%Y-%m-%d')}",
         "orgId": org_id,
-        "date": now.strftime("%Y-%m-%d"),
+        "date": (now - timedelta(days=1)).strftime("%Y-%m-%d"),
         "timestamp": window_end,
         "nrs": Decimal(str(round(nrs, 2))),
         "mttaSeconds": Decimal(str(round(mtta_seconds, 1))) if mtta_seconds else Decimal("0"),
@@ -72,6 +73,7 @@ def handler(event, context):
         logger.info("nrs_snapshot_stored", snapshot_id=snapshot["snapshotId"], nrs=nrs)
     except Exception as e:
         logger.error("snapshot_store_failed", error=str(e))
+        raise
 
     logger.info(
         "nrs_calculation_complete",
@@ -90,78 +92,31 @@ def handler(event, context):
     }
 
 
-def _count_signals_by_status(signal_table, window_start: str, status: str = None) -> int:
-    """Count signals in the time window, optionally filtered by status.
-
-    For MVP, we scan with a filter. Production would use a GSI on status+ingestedAt.
-    """
-    try:
-        filter_expr = "ingestedAt > :start"
-        expr_values: dict = {":start": window_start}
-
-        if status:
-            filter_expr += " AND #status = :status"
-            response = signal_table.scan(
-                FilterExpression=filter_expr,
-                ExpressionAttributeNames={"#status": "status"},
-                ExpressionAttributeValues={**expr_values, ":status": status},
-                Select="COUNT",
-                Limit=10000,
-            )
-        else:
-            response = signal_table.scan(
-                FilterExpression=filter_expr,
-                ExpressionAttributeValues=expr_values,
-                Select="COUNT",
-                Limit=10000,
-            )
-
-        return response.get("Count", 0)
-
-    except Exception as e:
-        logger.warning("signal_count_failed", status=status, error=str(e))
-        return 0
+def _count_signals_by_status(signal_table, window_start: str, status: str = None, window_end: str = None) -> int:
+    """Count actual signal decisions, excluding outbox receipts and other tenants."""
+    kwargs = {'FilterExpression': 'ingestedAt >= :start AND ingestedAt < :end AND (attribute_not_exists(recordType) OR recordType = :signal) AND (org_id = :org OR (attribute_not_exists(org_id) AND :org = :default))',
+              'ExpressionAttributeValues': {':start': window_start, ':end': window_end or datetime.utcnow().isoformat() + 'Z', ':signal': 'signal', ':org': os.environ.get('ORG_ID', 'default'), ':default': 'default'}, 'Select': 'COUNT'}
+    if status:
+        kwargs['FilterExpression'] += ' AND #status = :status'
+        kwargs['ExpressionAttributeNames'] = {'#status': 'status'}
+        kwargs['ExpressionAttributeValues'][':status'] = status
+    return sum(page.get('Count', 0) for page in pages(signal_table, **kwargs))
 
 
-def _compute_mtta(delivery_table, window_start: str) -> float:
-    """Compute Mean Time To Acknowledge for deliveries in the window.
-
-    Returns average seconds between deliveredAt and acknowledgedAt.
-    """
-    try:
-        response = delivery_table.scan(
-            FilterExpression="deliveredAt > :start AND attribute_exists(acknowledgedAt)",
-            ExpressionAttributeValues={":start": window_start},
-            ProjectionExpression="deliveredAt, acknowledgedAt",
-            Limit=5000,
-        )
-
-        items = response.get("Items", [])
-        if not items:
-            return 0.0
-
-        total_seconds = 0.0
-        count = 0
-
-        for item in items:
-            delivered = item.get("deliveredAt", "")
-            acknowledged = item.get("acknowledgedAt", "")
-            if delivered and acknowledged:
-                try:
-                    d_dt = datetime.fromisoformat(delivered.rstrip("Z"))
-                    a_dt = datetime.fromisoformat(acknowledged.rstrip("Z"))
-                    diff = (a_dt - d_dt).total_seconds()
-                    if diff >= 0:
-                        total_seconds += diff
-                        count += 1
-                except (ValueError, TypeError):
-                    pass
-
-        return total_seconds / count if count > 0 else 0.0
-
-    except Exception as e:
-        logger.warning("mtta_computation_failed", error=str(e))
-        return 0.0
+def _compute_mtta(delivery_table, window_start: str, window_end: str = None) -> float:
+    values = []
+    for page in pages(delivery_table,
+            FilterExpression='deliveredAt >= :start AND deliveredAt < :end AND attribute_exists(acknowledgedAt) AND (orgId = :org OR (attribute_not_exists(orgId) AND :org = :default))',
+            ExpressionAttributeValues={':start': window_start, ':end': window_end or datetime.utcnow().isoformat() + 'Z', ':org': os.environ.get('ORG_ID', 'default'), ':default': 'default'},
+            ProjectionExpression='deliveredAt, acknowledgedAt'):
+        for item in page.get('Items', []):
+            try:
+                diff = (parse_time(item['acknowledgedAt']) - parse_time(item['deliveredAt'])).total_seconds()
+                if diff >= 0:
+                    values.append(diff)
+            except (ValueError, TypeError, KeyError):
+                continue
+    return sum(values) / len(values) if values else 0.0
 
 
 def _publish_metrics(
@@ -216,3 +171,4 @@ def _publish_metrics(
 
     except Exception as e:
         logger.warning("metrics_publish_failed", error=str(e))
+        raise
