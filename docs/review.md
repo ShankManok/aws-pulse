@@ -25,7 +25,7 @@ Local acceptance checks cover 183 Python tests, nine infrastructure contracts, T
 | Learning | Evidence is counted per distinct signal/source, not per recipient. A useful response overrides noise for that signal. Learning requires at least three noise incidents and an 80% noise ratio. One map entry per source replaces repeated appended rules. Useful feedback can remove a learned rule. Learned suppression never hides high or critical signals. |
 | Metrics | UTC calendar-day boundaries, pagination and tenant filters. Receipts and correlated-but-delivered signals do not count as deduplication. Only fully suppressed routing decisions are written as suppressed. MTTA ignores malformed or negative durations. Failed writes propagate. |
 | Audit | Every delivery insertion, update and deletion is exported from its DynamoDB stream. Content-addressed hourly reconciliation snapshots use half-open time windows. Conditional S3 writes prevent replay overwrites; versioning and 365-day compliance Object Lock retain object versions. Failure queues preserve exhausted stream records. |
-| CI | Lint, Python/SDK coverage gate, TypeScript build, infrastructure contracts and packaged-handler import checks. Dev deployment remains manually dispatched and test-gated. |
+| CI | Lint, Python/SDK coverage gate, TypeScript build, infrastructure contracts and packaged-handler import checks. Dev deployment remains manually dispatched and test-gated. Each deployer supplies their own `AWS_ROLE_ARN` environment secret; no account-specific ARN or credentials are committed. |
 
 ## SDK/API availability
 
