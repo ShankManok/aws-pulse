@@ -11,6 +11,47 @@ See [current configuration and recovery](operations.md) for Secrets Manager, SES
 - AWS CDK CLI: `npm install -g aws-cdk`
 - An AWS account with permissions for: Lambda, DynamoDB, Kinesis, S3, SES, API Gateway, Step Functions, EventBridge, IAM, CloudWatch, SNS, Athena, SQS
 
+## GitHub Actions OIDC Setup
+
+The repository intentionally contains no deployer's AWS role ARN or credentials. Every person or organization deploying a fork must configure their own AWS account.
+
+1. In the target AWS account, add the GitHub Actions OIDC provider `https://token.actions.githubusercontent.com` with audience `sts.amazonaws.com`, if it does not already exist.
+2. Create a deployment IAM role with only the permissions needed to bootstrap and deploy these CDK stacks.
+3. Restrict the role trust policy to the deployer's repository and the `dev` GitHub environment. Replace both placeholders in this example:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
+          "token.actions.githubusercontent.com:sub": "repo:<github-owner>/aws-pulse:environment:dev"
+        }
+      }
+    }
+  ]
+}
+```
+
+4. In the GitHub fork, create the `dev` environment under **Settings > Environments**.
+5. Add an environment secret named `AWS_ROLE_ARN` whose value is that account's complete deployment-role ARN.
+6. Run **Deploy Dev** from the Actions tab.
+
+The workflow keeps the value indirect:
+
+```yaml
+role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+```
+
+Do not commit a real role ARN or AWS access keys. The notation `arn:aws:iam::<account-id>:role/<role-name>` is a placeholder for documentation only. GitHub does not copy Actions secrets into forks, so each deployer must complete these steps. A missing secret stops the workflow before it requests AWS credentials.
+
 ## Initial Setup
 
 ```bash

@@ -44,6 +44,10 @@ The tested core now has transactional ingestion, replay-aware delivery, full esc
 
 Resolve the review's release gates and configure a sandbox account first. The GitHub dev deployment workflow is manually dispatched and validates the code before deployment. A passing local suite does not verify SES identities, model access or Slack routing.
 
+This public repository does not contain an AWS account ID, role ARN or AWS credentials. Each deployer must create an IAM role in their own AWS account, configure its GitHub OIDC trust, and store the resulting role ARN as the `AWS_ROLE_ARN` Actions secret in the `dev` environment. The workflow reads `${{ secrets.AWS_ROLE_ARN }}`; do not replace it with a real ARN in source control. Use `arn:aws:iam::<account-id>:role/<role-name>` only as documentation placeholder syntax. Forks do not inherit Actions secrets.
+
+See the [deployment guide](docs/deployment.md#github-actions-oidc-setup) for the trust-policy subject and setup steps.
+
 ```bash
 npm run synth
 # After account configuration and readiness review:
